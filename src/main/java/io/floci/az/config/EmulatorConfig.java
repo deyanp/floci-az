@@ -425,6 +425,32 @@ public interface EmulatorConfig {
          * via a custom domain name (e.g. "myhost.internal").
          */
         Optional<List<String>> extraSuffixes();
+
+        /**
+         * When {@code true} (default), the configured {@link #containerFallbackServers()} may be
+         * appended after floci-az's embedded DNS as secondary resolvers for spawned function
+         * containers. This gives them a real secondary resolver so public hostnames still resolve
+         * if floci-az's embedded forwarder cannot answer — mirroring the
+         * {@code docker run --dns <floci-az IP> --dns 8.8.8.8} workaround.
+         *
+         * <p>Disable (via {@code FLOCI_AZ_DNS_CONTAINER_FALLBACK_ENABLED=false}) in offline or
+         * locked-down networks where the public resolvers are unreachable/blocked.
+         */
+        @WithDefault("true")
+        boolean containerFallbackEnabled();
+
+        /**
+         * Ordered list of public DNS resolvers used as the fallback upstream for floci-az's
+         * embedded DNS forwarder and (when {@link #containerFallbackEnabled()}) as the secondary
+         * resolvers for spawned containers.
+         *
+         * <p>Via environment variable (comma-separated):
+         * <pre>
+         * FLOCI_AZ_DNS_CONTAINER_FALLBACK_SERVERS=1.1.1.1,1.0.0.1
+         * </pre>
+         */
+        @WithDefault("8.8.8.8,8.8.4.4")
+        List<String> containerFallbackServers();
     }
 
     interface AuthConfig {
@@ -663,6 +689,23 @@ public interface EmulatorConfig {
         /** Auto-generate a self-signed certificate when no cert-path/key-path provided. */
         @WithDefault("true")
         boolean selfSigned();
+
+        /**
+         * Additional port the TLS proxy binds for HTTPS traffic, alongside the public
+         * floci-az {@link EmulatorConfig#port()}.
+         *
+         * <p>Azure SDKs default to {@code https://} endpoints on the conventional 443 unless an
+         * explicit port is configured. Binding 443 here (with the same HTTP/HTTPS protocol
+         * detection used on the main port) lets clients that assume Azure lives on 443 reach
+         * floci-az.
+         *
+         * <p>Default {@code 443}. Set to {@code 0} to disable the extra binding (e.g. when
+         * floci-az runs unprivileged or another process owns 443). When equal to
+         * {@link EmulatorConfig#port()} only a single listener is started.
+         * Env: FLOCI_AZ_TLS_HTTPS_PORT
+         */
+        @WithDefault("443")
+        int httpsPort();
     }
 
     /**
