@@ -1,6 +1,7 @@
 package io.floci.az.services.vm;
 
 import io.floci.az.config.EmulatorConfig;
+import io.floci.az.core.docker.ContainerStorageHelper;
 import io.floci.az.core.docker.ContainerBuilder;
 import io.floci.az.core.docker.ContainerLifecycleManager;
 import io.floci.az.core.docker.ContainerLifecycleManager.ContainerInfo;
@@ -142,14 +143,14 @@ public class VmContainerManager {
         return null;
     }
 
-    static String containerName(VirtualMachine vm) {
+    String containerName(VirtualMachine vm) {
         String id = vm.getVmId() != null
                 ? vm.getVmId().replace("-", "")
                 : sanitize(vm.getName());
         if (id.length() > 12) {
             id = id.substring(0, 12);
         }
-        return "floci-az-vm-" + id;
+        return ContainerStorageHelper.dockerName(config, "vm-" + id);
     }
 
     private static String sanitize(String name) {

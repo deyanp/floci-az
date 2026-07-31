@@ -685,6 +685,12 @@ public interface EmulatorConfig {
         /** Path to a directory containing Docker's config.json. */
         Optional<String> dockerConfigPath();
 
+        /**
+         * Optional namespace inserted into emulator-managed child container and volume names.
+         * Useful when multiple emulator processes share one Docker daemon.
+         */
+        Optional<String> resourceNamespace();
+
         /** Explicit credentials for private Docker registries. */
         @WithDefault("")
         List<RegistryCredential> registryCredentials();

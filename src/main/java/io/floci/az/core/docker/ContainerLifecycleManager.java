@@ -1,6 +1,7 @@
 package io.floci.az.core.docker;
 
 import com.github.dockerjava.api.DockerClient;
+import io.floci.az.config.EmulatorConfig;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.CreateContainerCmd;
 import com.github.dockerjava.api.command.CreateContainerResponse;
@@ -42,16 +43,19 @@ public class ContainerLifecycleManager {
     private final ImageCacheService imageCacheService;
     private final ContainerDetector containerDetector;
     private final PortAllocator portAllocator;
+    private final EmulatorConfig config;
 
     @Inject
     public ContainerLifecycleManager(DockerClient dockerClient,
                                      ImageCacheService imageCacheService,
                                      ContainerDetector containerDetector,
-                                     PortAllocator portAllocator) {
+                                     PortAllocator portAllocator,
+                                     EmulatorConfig config) {
         this.dockerClient = dockerClient;
         this.imageCacheService = imageCacheService;
         this.containerDetector = containerDetector;
         this.portAllocator = portAllocator;
+        this.config = config;
     }
 
     public ContainerInfo createAndStart(ContainerSpec spec) {
@@ -82,6 +86,7 @@ public class ContainerLifecycleManager {
                     .toArray(ExposedPort[]::new);
             createCmd.withExposedPorts(exposed);
         }
+        createCmd.withLabels(mergedLabels(spec.labels()));
 
         CreateContainerResponse response = createCmd.exec();
         String containerId = response.getId();
@@ -138,14 +143,29 @@ public class ContainerLifecycleManager {
         }
     }
 
+    /**
+     * Creates a named volume if it does not already exist. Idempotent — safe to call on every
+     * container start. Labels the volume {@code floci=true} and {@code floci_emulator=floci-az}
+     * so both {@code docker volume prune --filter label=floci=true} (all emulators) and
+     * {@code --filter label=floci_emulator=floci-az} (this emulator only) work.
+     */
     public void ensureVolume(String volumeName) {
         if (!volumeExists(volumeName)) {
             dockerClient.createVolumeCmd()
                     .withName(volumeName)
-                    .withLabels(Map.of("floci", "true"))
+                    .withLabels(ContainerStorageHelper.defaultLabels(config))
                     .exec();
             LOG.debugv("Created volume {0}", volumeName);
         }
+    }
+
+    /** Default emulator labels merged with per-spec labels; spec labels win on collision. */
+    private Map<String, String> mergedLabels(Map<String, String> specLabels) {
+        Map<String, String> labels = ContainerStorageHelper.defaultLabels(config);
+        if (specLabels != null) {
+            labels.putAll(specLabels);
+        }
+        return labels;
     }
 
     public void removeVolume(String volumeName) {

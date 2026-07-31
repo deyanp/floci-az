@@ -1,6 +1,7 @@
 package io.floci.az.services.acr;
 
 import io.floci.az.config.EmulatorConfig;
+import io.floci.az.core.docker.ContainerStorageHelper;
 import io.floci.az.core.docker.ContainerBuilder;
 import io.floci.az.core.docker.ContainerDetector;
 import io.floci.az.core.docker.ContainerLifecycleManager;
@@ -29,7 +30,9 @@ public class AcrRegistryManager {
 
     private static final Logger LOG = Logger.getLogger(AcrRegistryManager.class);
     private static final int REGISTRY_PORT = 5000;
-    private static final String SHARED_NAME = "floci-az-acr-registry";
+    private String sharedName() {
+        return ContainerStorageHelper.dockerName(config, "acr-registry");
+    }
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -65,17 +68,17 @@ public class AcrRegistryManager {
             if (lifecycleManager.isContainerRunning(containerId)) {
                 return;
             }
-            LOG.warnv("Shared ACR registry {0} is no longer running; restarting it", SHARED_NAME);
+            LOG.warnv("Shared ACR registry {0} is no longer running; restarting it", sharedName());
             started = false;
             containerId = null;
         }
         EmulatorConfig.AcrConfig acrConfig = config.services().acr();
-        lifecycleManager.removeIfExists(SHARED_NAME);
+        lifecycleManager.removeIfExists(sharedName());
 
         int chosenPort = portAllocator.allocate(acrConfig.basePort(), acrConfig.maxPort());
         try {
             ContainerSpec spec = containerBuilder.newContainer(acrConfig.defaultImage())
-                    .withName(SHARED_NAME)
+                    .withName(sharedName())
                     .withEnv("REGISTRY_STORAGE_DELETE_ENABLED", "true")
                     .withEnv("REGISTRY_HTTP_ADDR", "0.0.0.0:" + REGISTRY_PORT)
                     .withPortBinding(REGISTRY_PORT, chosenPort)
@@ -89,12 +92,12 @@ public class AcrRegistryManager {
 
             ContainerLifecycleManager.EndpointInfo ep = info.getEndpoint(REGISTRY_PORT);
             if (containerDetector.isRunningInContainer()) {
-                this.internalEndpoint = SHARED_NAME + ":" + REGISTRY_PORT;
+                this.internalEndpoint = sharedName() + ":" + REGISTRY_PORT;
             } else {
                 this.internalEndpoint = ep != null ? ep.host() + ":" + ep.port() : "localhost:" + chosenPort;
             }
             this.started = true;
-            LOG.infov("Started shared ACR registry {0} on host port {1}", SHARED_NAME, String.valueOf(chosenPort));
+            LOG.infov("Started shared ACR registry {0} on host port {1}", sharedName(), String.valueOf(chosenPort));
         } catch (Exception e) {
             throw new RuntimeException("Failed to start shared ACR registry container: " + e.getMessage(), e);
         }
@@ -103,7 +106,7 @@ public class AcrRegistryManager {
     /** The path-prefixed {@code loginServer} for a registry (host[:port]/{registryName}). */
     public String loginServer(String registryName) {
         String host = containerDetector.isRunningInContainer()
-                ? SHARED_NAME + ":" + REGISTRY_PORT
+                ? sharedName() + ":" + REGISTRY_PORT
                 : "localhost:" + hostPort;
         return host + "/" + registryName;
     }

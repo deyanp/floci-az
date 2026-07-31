@@ -1,6 +1,7 @@
 package io.floci.az.services.aks;
 
 import io.floci.az.config.EmulatorConfig;
+import io.floci.az.core.docker.ContainerStorageHelper;
 import io.floci.az.core.docker.ContainerBuilder;
 import io.floci.az.core.docker.ContainerDetector;
 import io.floci.az.core.docker.ContainerLifecycleManager;
@@ -67,7 +68,10 @@ public class AksClusterManager {
         lifecycleManager.removeIfExists(containerName);
 
         // Named volume for k3s data — prevents macOS APFS chmod(EINVAL) that crashes kine.
+        // Created explicitly (not implicitly by the mount) so it carries the emulator labels.
         String volumeName = containerName;
+        boolean volumeCreatedByThisStart = !lifecycleManager.volumeExists(volumeName);
+        lifecycleManager.ensureVolume(volumeName);
         ContainerSpec spec = containerBuilder.newContainer(image)
                 .withName(containerName)
                 .withCmd(List.of("server",
@@ -81,7 +85,21 @@ public class AksClusterManager {
                 .withLogRotation()
                 .build();
 
-        ContainerLifecycleManager.ContainerInfo info = lifecycleManager.createAndStart(spec);
+        ContainerLifecycleManager.ContainerInfo info;
+        try {
+            info = lifecycleManager.createAndStart(spec);
+        } catch (RuntimeException e) {
+            // Dispose whatever this start managed to create. The container is removed first:
+            // a container that started but failed post-start inspection would otherwise keep
+            // running and pin the volume. The volume is only removed when THIS start created
+            // it — a pre-existing one may hold a previous cluster's k3s state and must
+            // survive a transient start failure.
+            lifecycleManager.removeIfExists(containerName);
+            if (volumeCreatedByThisStart) {
+                lifecycleManager.removeVolume(volumeName);
+            }
+            throw e;
+        }
         cluster.setContainerId(info.containerId());
 
         if (containerDetector.isRunningInContainer()) {
@@ -174,8 +192,8 @@ public class AksClusterManager {
         LOG.infov("Stopped k3s container for AKS cluster {0}", cluster.getName());
     }
 
-    private static String containerName(ManagedCluster cluster) {
-        return "floci-az-aks-" + cluster.getInstanceId();
+    private String containerName(ManagedCluster cluster) {
+        return ContainerStorageHelper.dockerName(config, "aks-" + cluster.getInstanceId());
     }
 
     private String execInContainer(String containerId, String[] cmd) throws Exception {

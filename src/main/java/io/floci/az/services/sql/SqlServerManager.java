@@ -1,6 +1,7 @@
 package io.floci.az.services.sql;
 
 import io.floci.az.config.EmulatorConfig;
+import io.floci.az.core.docker.ContainerStorageHelper;
 import io.floci.az.core.docker.ContainerBuilder;
 import io.floci.az.core.docker.ContainerDetector;
 import io.floci.az.core.docker.ContainerLifecycleManager;
@@ -169,8 +170,8 @@ public class SqlServerManager {
         }
     }
 
-    private static String containerName(String serverName) {
-        return "floci-az-sql-" + serverName.toLowerCase().replaceAll("[^a-z0-9-]", "-");
+    private String containerName(String serverName) {
+        return ContainerStorageHelper.dockerName(config, "sql-" + serverName.toLowerCase().replaceAll("[^a-z0-9-]", "-"));
     }
 
     @PreDestroy

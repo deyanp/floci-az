@@ -1,6 +1,7 @@
 package io.floci.az.services.mysql;
 
 import io.floci.az.config.EmulatorConfig;
+import io.floci.az.core.docker.ContainerStorageHelper;
 import io.floci.az.core.docker.ContainerBuilder;
 import io.floci.az.core.docker.ContainerDetector;
 import io.floci.az.core.docker.ContainerLifecycleManager;
@@ -176,8 +177,8 @@ public class MySqlServerManager {
         }
     }
 
-    private static String containerName(String serverName) {
-        return "floci-az-mysql-" + serverName.toLowerCase().replaceAll("[^a-z0-9-]", "-");
+    private String containerName(String serverName) {
+        return ContainerStorageHelper.dockerName(config, "mysql-" + serverName.toLowerCase().replaceAll("[^a-z0-9-]", "-"));
     }
 
     @PreDestroy

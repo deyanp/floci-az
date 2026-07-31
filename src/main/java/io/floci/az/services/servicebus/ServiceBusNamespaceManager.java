@@ -1,6 +1,7 @@
 package io.floci.az.services.servicebus;
 
 import io.floci.az.config.EmulatorConfig;
+import io.floci.az.core.docker.ContainerStorageHelper;
 import io.floci.az.core.docker.ContainerBuilder;
 import io.floci.az.core.docker.ContainerLifecycleManager;
 import io.floci.az.core.docker.ContainerLifecycleManager.EndpointInfo;
@@ -274,8 +275,8 @@ public class ServiceBusNamespaceManager {
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
-    static String containerName(String namespaceName) {
-        return "floci-az-servicebus-" + namespaceName;
+    String containerName(String namespaceName) {
+        return ContainerStorageHelper.dockerName(config, "servicebus-" + namespaceName);
     }
 
     private static String rootMessage(Throwable error) {

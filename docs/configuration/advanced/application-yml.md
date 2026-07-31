@@ -56,6 +56,7 @@ floci-az:
     docker-host: unix:///var/run/docker.sock
     log-max-size: "10m"
     log-max-file: "3"
+    resource-namespace: ""            # Optional; inserted into sidecar container/volume names (floci-az-<ns>-...)
 
   services:
     blob:

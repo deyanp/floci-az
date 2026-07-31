@@ -1,20 +1,16 @@
 package io.floci.az.services.functions;
 
 import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.command.CreateContainerResponse;
-import com.github.dockerjava.api.command.InspectContainerResponse;
-import com.github.dockerjava.api.command.PullImageResultCallback;
-import com.github.dockerjava.api.exception.NotFoundException;
-import com.github.dockerjava.api.model.ExposedPort;
-import com.github.dockerjava.api.model.HostConfig;
-import com.github.dockerjava.api.model.LogConfig;
-import com.github.dockerjava.api.model.Ports;
 import io.floci.az.config.EmulatorConfig;
-import io.floci.az.core.dns.EmbeddedDnsServer;
+import io.floci.az.core.docker.ContainerBuilder;
 import io.floci.az.core.docker.ContainerDetector;
+import io.floci.az.core.docker.ContainerLifecycleManager;
+import io.floci.az.core.docker.ContainerLifecycleManager.ContainerInfo;
+import io.floci.az.core.docker.ContainerLifecycleManager.EndpointInfo;
+import io.floci.az.core.docker.ContainerSpec;
+import io.floci.az.core.docker.ContainerStorageHelper;
 import io.floci.az.core.docker.DockerHostResolver;
 import io.floci.az.services.functions.FunctionModels.FunctionDefinition;
-import java.util.List;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
@@ -35,18 +31,16 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Creates and destroys Docker containers for Azure Functions execution.
  *
  * Launch sequence:
- *   1. Ensure runtime image is present locally (pull if needed)
+ *   1. Build the container spec ({@link ContainerBuilder}; image pull handled by the core layer)
  *   2. Create container, binding port 80 → random host port
- *   3. Start container
- *   4. Inject code via TAR stream to /home/site/wwwroot (works even inside Docker)
+ *   3. Inject host.json and code via TAR stream to /home/site/wwwroot (works even inside Docker)
+ *   4. Start container
  *   5. Poll /admin/host/status until the Functions host reports ready
  *   6. Return ContainerHandle with resolved host:port
  */
@@ -59,23 +53,26 @@ public class ContainerLauncher {
     private static final int FUNCTIONS_PORT = 80;
 
     private final DockerClient dockerClient;
+    private final ContainerBuilder containerBuilder;
+    private final ContainerLifecycleManager lifecycleManager;
     private final DockerHostResolver hostResolver;
     private final ContainerDetector containerDetector;
-    private final EmbeddedDnsServer embeddedDnsServer;
     private final EmulatorConfig config;
     private final HttpClient httpClient;
     private volatile String cachedNetworkMode;
 
     @Inject
     public ContainerLauncher(DockerClient dockerClient,
+                             ContainerBuilder containerBuilder,
+                             ContainerLifecycleManager lifecycleManager,
                              DockerHostResolver hostResolver,
                              ContainerDetector containerDetector,
-                             EmbeddedDnsServer embeddedDnsServer,
                              EmulatorConfig config) {
         this.dockerClient    = dockerClient;
+        this.containerBuilder = containerBuilder;
+        this.lifecycleManager = lifecycleManager;
         this.hostResolver    = hostResolver;
         this.containerDetector = containerDetector;
-        this.embeddedDnsServer = embeddedDnsServer;
         this.config          = config;
         this.httpClient      = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(2))
@@ -94,55 +91,28 @@ public class ContainerLauncher {
                 primary.appName(), appDefs.size());
 
         String image = FunctionRuntime.resolveImage(primary.runtime(), primary.linuxFxVersion());
-        ensureImage(image);
-
         List<String> env = buildEnv(primary);
 
         String shortId = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
-        String containerName = "floci-az-fn-" + primary.appName() + "-" + shortId;
+        String containerName = ContainerStorageHelper.dockerName(config,
+                "fn-" + primary.appName() + "-" + shortId);
 
-        // Use primary as `def` alias for the remainder of the method
-        FunctionDefinition def = primary;
-
-        // Create container with port 80 bound to a dynamic host port
-        ExposedPort exposed  = ExposedPort.tcp(FUNCTIONS_PORT);
-        Ports portBindings   = new Ports();
-        portBindings.bind(exposed, Ports.Binding.bindPort(0));
-
-        List<String> extraHosts = new ArrayList<>();
-        if (hostResolver.isLinuxHost()) {
-            // On native Linux Docker, host.docker.internal is not auto-injected into
-            // containers (unlike Docker Desktop on macOS/Windows). Adding host-gateway
-            // makes it resolvable from inside function containers on all Linux setups.
-            extraHosts.add("host.docker.internal:host-gateway");
-        }
-
-        LogConfig logConfig = new LogConfig(LogConfig.LoggingType.JSON_FILE, Map.of(
-                "max-size", config.docker().logMaxSize(),
-                "max-file", config.docker().logMaxFile()
-        ));
-
-        HostConfig hostConfig = HostConfig.newHostConfig()
-                .withPortBindings(portBindings)
-                .withExtraHosts(extraHosts.toArray(new String[0]))
-                .withLogConfig(logConfig);
-
-        embeddedDnsServer.getServerIp().ifPresent(dnsIp -> {
-            hostConfig.withDns(dnsIp);
-            LOG.debugv("Injecting embedded DNS server {0} into function container {1}", dnsIp, containerName);
-        });
-
-        String networkMode = resolveNetworkMode();
-
-        CreateContainerResponse created = dockerClient.createContainerCmd(image)
+        ContainerBuilder.Builder builder = containerBuilder.newContainer(image)
                 .withName(containerName)
-                .withExposedPorts(exposed)
-                .withHostConfig(hostConfig)
-                .withNetworkMode(networkMode)
+                .withDynamicPort(FUNCTIONS_PORT)
                 .withEnv(env)
-                .exec();
+                .withHostDockerInternalOnLinux()
+                .withEmbeddedDns()
+                .withLogRotation();
+        String networkMode = resolveNetworkMode();
+        if (!"bridge".equals(networkMode)) {
+            // "bridge" is Docker's default; setting it explicitly would make startCreated try to
+            // re-connect the container to a network it is already on.
+            builder.withNetworkMode(networkMode);
+        }
+        ContainerSpec spec = builder.build();
 
-        String containerId = created.getId();
+        String containerId = lifecycleManager.create(spec);
         LOG.infov("Created container {0} ({1})", containerName, containerId.substring(0, 12));
 
         // Inject a shared host.json at the wwwroot root so the Functions host starts
@@ -157,45 +127,20 @@ public class ContainerLauncher {
             }
         }
 
-        dockerClient.startContainerCmd(containerId).exec();
+        ContainerInfo info = lifecycleManager.startCreated(containerId, spec);
+        EndpointInfo endpoint = info.getEndpoint(FUNCTIONS_PORT);
 
-        // Discover the dynamically assigned host port
-        InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
-        int hostPort = resolveHostPort(inspect, exposed);
+        LOG.infov("Container {0} listening on {1}", containerId.substring(0, 12), endpoint);
 
-        String targetHost = "localhost";
-        if (containerDetector.isRunningInContainer()) {
-            // Use the container's IP on the shared network
-            var networks = inspect.getNetworkSettings().getNetworks();
-            if (!networks.isEmpty()) {
-                targetHost = networks.values().iterator().next().getIpAddress();
-                LOG.infov("Container {0} detected at IP {1} on network {2}",
-                        containerId.substring(0, 12), targetHost, networks.keySet().iterator().next());
-            }
-        }
+        waitForReady(endpoint.host(), endpoint.port(), 60);
 
-        LOG.infov("Container {0} listening on {1}:{2}", containerId.substring(0, 12), targetHost, hostPort);
-
-        // Wait for Azure Functions host to become ready
-        int targetPort = targetHost.equals("localhost") ? hostPort : 80;
-        waitForReady(targetHost, targetPort, 60);
-
-        return new ContainerHandle(containerId, def.appKey(), targetHost, targetPort);
+        return new ContainerHandle(containerId, primary.appKey(), endpoint.host(), endpoint.port());
     }
 
     public void stop(ContainerHandle handle) {
         LOG.infov("Stopping container {0}", handle.containerId().substring(0, 12));
         handle.setState(ContainerHandle.State.STOPPED);
-        try {
-            dockerClient.stopContainerCmd(handle.containerId()).withTimeout(5).exec();
-        } catch (NotFoundException e) {
-            // Already gone
-        } catch (Exception e) {
-            LOG.warnv("Error stopping container {0}: {1}", handle.containerId(), e.getMessage());
-        }
-        try {
-            dockerClient.removeContainerCmd(handle.containerId()).withForce(true).exec();
-        } catch (Exception ignored) {}
+        lifecycleManager.stopAndRemove(handle.containerId(), null);
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
@@ -220,25 +165,6 @@ public class ContainerLauncher {
         return "bridge";
     }
 
-    private void ensureImage(String image) {
-        try {
-            dockerClient.inspectImageCmd(image).exec();
-            LOG.debugv("Image already present: {0}", image);
-        } catch (NotFoundException e) {
-            LOG.infov("Pulling image: {0}", image);
-            try {
-                boolean pulled = dockerClient.pullImageCmd(image)
-                        .exec(new PullImageResultCallback())
-                        .awaitCompletion(10, TimeUnit.MINUTES);
-                if (!pulled) throw new RuntimeException("Timed out pulling image: " + image);
-                LOG.infov("Pulled image: {0}", image);
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                throw new RuntimeException("Interrupted while pulling image: " + image, ie);
-            }
-        }
-    }
-
     private List<String> buildEnv(FunctionDefinition def) {
         String flociHost = hostResolver.resolve();
         int flociPort    = config.port();
@@ -258,15 +184,6 @@ public class ContainerLauncher {
             def.environment().forEach((k, v) -> env.add(k + "=" + v));
         }
         return env;
-    }
-
-    private static int resolveHostPort(InspectContainerResponse inspect, ExposedPort exposed) {
-        var bindings = inspect.getNetworkSettings().getPorts().getBindings();
-        var binding  = bindings.get(exposed);
-        if (binding == null || binding.length == 0) {
-            throw new RuntimeException("No host port binding found for container port " + exposed.getPort());
-        }
-        return Integer.parseInt(binding[0].getHostPortSpec());
     }
 
     private void injectHostJson(String containerId) {
@@ -353,8 +270,8 @@ public class ContainerLauncher {
         return tar;
     }
 
-    private void waitForReady(String targetHost, int hostPort, int timeoutSeconds) {
-        String url = "http://" + targetHost + ":" + (targetHost.equals("localhost") ? hostPort : 80) + "/admin/host/status";
+    private void waitForReady(String targetHost, int targetPort, int timeoutSeconds) {
+        String url = "http://" + targetHost + ":" + targetPort + "/admin/host/status";
         long deadline = System.currentTimeMillis() + (timeoutSeconds * 1000L);
         LOG.infov("Waiting for Azure Functions host on {0}...", url);
 

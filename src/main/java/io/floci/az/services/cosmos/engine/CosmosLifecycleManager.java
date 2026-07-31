@@ -1,6 +1,7 @@
 package io.floci.az.services.cosmos.engine;
 
 import io.floci.az.config.EmulatorConfig;
+import io.floci.az.core.docker.ContainerStorageHelper;
 import io.floci.az.core.docker.ContainerBuilder;
 import io.floci.az.core.docker.ContainerLifecycleManager;
 import io.floci.az.core.docker.ContainerSpec;
@@ -140,7 +141,7 @@ public class CosmosLifecycleManager {
 
         LOG.infof("Starting Cosmos engine %s with image=%s port=%d", api, image, hostPort);
 
-        String containerName = "floci-az-cosmos-" + api.name().toLowerCase();
+        String containerName = ContainerStorageHelper.dockerName(config, "cosmos-" + api.name().toLowerCase());
         containerManager.removeIfExists(containerName);
 
         ContainerSpec spec = buildSpec(containerName, image, hostPort, engine.defaultPort(), api);
