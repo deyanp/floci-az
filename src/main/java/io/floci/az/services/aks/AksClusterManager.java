@@ -89,8 +89,12 @@ public class AksClusterManager {
         try {
             info = lifecycleManager.createAndStart(spec);
         } catch (RuntimeException e) {
-            // Only dispose a volume THIS start created — a pre-existing one may hold a
-            // previous cluster's k3s state and must survive a transient start failure.
+            // Dispose whatever this start managed to create. The container is removed first:
+            // a container that started but failed post-start inspection would otherwise keep
+            // running and pin the volume. The volume is only removed when THIS start created
+            // it — a pre-existing one may hold a previous cluster's k3s state and must
+            // survive a transient start failure.
+            lifecycleManager.removeIfExists(containerName);
             if (volumeCreatedByThisStart) {
                 lifecycleManager.removeVolume(volumeName);
             }
