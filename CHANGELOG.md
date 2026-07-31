@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **docker:** every emulator-created container and volume is now labelled `floci=true`
+  (umbrella across the Floci emulators) and `floci_emulator=floci-az` (per-emulator
+  discriminator), applied centrally in the container lifecycle layer — so
+  `docker ps --filter label=floci_emulator=floci-az` and
+  `docker volume prune --filter label=floci_emulator=floci-az` target this emulator
+  alone, while `label=floci=true` still matches all Floci emulators. The `floci-az-`
+  name prefix is now owned by a single naming helper instead of being spelled at each
+  call site (container names are unchanged), the Functions runtime container is created
+  through the shared container layer (it previously bypassed it and carried no labels),
+  and the AKS k3s volume is created explicitly so it is labelled too. New optional
+  `floci-az.docker.resource-namespace` (`FLOCI_AZ_DOCKER_RESOURCE_NAMESPACE`) inserts a
+  namespace into child container/volume names (`floci-az-<ns>-...`) and a
+  `floci_namespace` label, for running multiple emulator processes against one Docker
+  daemon. Note: with a namespace set, the Event Hubs broker certificate SAN
+  (`floci-az-artemis`) does not cover the namespaced container name for in-network TLS
+  clients — connect via `localhost` in that setup.
+
+### Added
+
 - **Network**: realistic property synthesis for `Microsoft.Network` load balancers
   (top-level `sku` round-trip, frontend/rule/pool ARM IDs), network security groups
   (rule IDs, the six real-Azure `defaultSecurityRules`, standalone `securityRules`

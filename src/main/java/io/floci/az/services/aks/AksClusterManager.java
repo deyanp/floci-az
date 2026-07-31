@@ -1,6 +1,7 @@
 package io.floci.az.services.aks;
 
 import io.floci.az.config.EmulatorConfig;
+import io.floci.az.core.docker.ContainerStorageHelper;
 import io.floci.az.core.docker.ContainerBuilder;
 import io.floci.az.core.docker.ContainerDetector;
 import io.floci.az.core.docker.ContainerLifecycleManager;
@@ -67,7 +68,9 @@ public class AksClusterManager {
         lifecycleManager.removeIfExists(containerName);
 
         // Named volume for k3s data — prevents macOS APFS chmod(EINVAL) that crashes kine.
+        // Created explicitly (not implicitly by the mount) so it carries the emulator labels.
         String volumeName = containerName;
+        lifecycleManager.ensureVolume(volumeName);
         ContainerSpec spec = containerBuilder.newContainer(image)
                 .withName(containerName)
                 .withCmd(List.of("server",
@@ -174,8 +177,8 @@ public class AksClusterManager {
         LOG.infov("Stopped k3s container for AKS cluster {0}", cluster.getName());
     }
 
-    private static String containerName(ManagedCluster cluster) {
-        return "floci-az-aks-" + cluster.getInstanceId();
+    private String containerName(ManagedCluster cluster) {
+        return ContainerStorageHelper.dockerName(config, "aks-" + cluster.getInstanceId());
     }
 
     private String execInContainer(String containerId, String[] cmd) throws Exception {

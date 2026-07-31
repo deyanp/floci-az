@@ -23,6 +23,7 @@ public record ContainerSpec(
         List<Mount> mounts,
         List<Bind> binds,
         List<String> extraHosts,
+        Map<String, String> labels,
         LogConfig logConfig,
         boolean privileged,
         List<String> dnsServers,
@@ -30,7 +31,7 @@ public record ContainerSpec(
 ) {
     public ContainerSpec(String image) {
         this(image, null, List.of(), null, null, null, Map.of(), List.of(), null,
-                List.of(), List.of(), List.of(), null, false, List.of(), null);
+                List.of(), List.of(), List.of(), Map.of(), null, false, List.of(), null);
     }
 
     public boolean hasPortBindings() {

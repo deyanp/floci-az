@@ -1,6 +1,7 @@
 package io.floci.az.services.eventhub;
 
 import io.floci.az.config.EmulatorConfig;
+import io.floci.az.core.docker.ContainerStorageHelper;
 import io.floci.az.core.docker.ContainerBuilder;
 import io.floci.az.core.docker.ContainerLifecycleManager;
 import io.floci.az.core.docker.ContainerSpec;
@@ -20,7 +21,9 @@ import java.util.List;
 public class EventHubsKafkaManager {
 
     private static final Logger LOG = Logger.getLogger(EventHubsKafkaManager.class);
-    private static final String CONTAINER_NAME = "floci-az-eventhubs-kafka";
+    private String containerName() {
+        return ContainerStorageHelper.dockerName(config, "eventhubs-kafka");
+    }
     private static final int KAFKA_PORT = 9092;
     private static final int ADMIN_PORT = 9644;
 
@@ -49,10 +52,10 @@ public class EventHubsKafkaManager {
         EmulatorConfig.EventHubConfig eh = config.services().eventHub();
         LOG.infov("Starting Redpanda (Kafka) sidecar for Event Hubs on port {0}", eh.kafkaPort());
 
-        lifecycleManager.removeIfExists(CONTAINER_NAME);
+        lifecycleManager.removeIfExists(containerName());
 
         ContainerSpec spec = containerBuilder.newContainer(eh.redpandaImage())
-                .withName(CONTAINER_NAME)
+                .withName(containerName())
                 .withCmd(List.of(
                         "redpanda", "start",
                         "--overprovisioned",

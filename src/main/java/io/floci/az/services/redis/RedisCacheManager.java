@@ -4,6 +4,7 @@ import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.model.Frame;
 import io.floci.az.config.EmulatorConfig;
+import io.floci.az.core.docker.ContainerStorageHelper;
 import io.floci.az.core.docker.ContainerBuilder;
 import io.floci.az.core.docker.ContainerDetector;
 import io.floci.az.core.docker.ContainerLifecycleManager;
@@ -171,8 +172,8 @@ public class RedisCacheManager {
         LOG.infov("Stopped Redis container for cache {0}", cache.getName());
     }
 
-    private static String containerName(RedisCache cache) {
-        return "floci-az-redis-" + cache.getInstanceId();
+    private String containerName(RedisCache cache) {
+        return ContainerStorageHelper.dockerName(config, "redis-" + cache.getInstanceId());
     }
 
     private String execInContainer(String containerId, String[] cmd) throws Exception {
