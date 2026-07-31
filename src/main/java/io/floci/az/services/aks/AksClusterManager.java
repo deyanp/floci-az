@@ -70,6 +70,7 @@ public class AksClusterManager {
         // Named volume for k3s data — prevents macOS APFS chmod(EINVAL) that crashes kine.
         // Created explicitly (not implicitly by the mount) so it carries the emulator labels.
         String volumeName = containerName;
+        boolean volumeCreatedByThisStart = !lifecycleManager.volumeExists(volumeName);
         lifecycleManager.ensureVolume(volumeName);
         ContainerSpec spec = containerBuilder.newContainer(image)
                 .withName(containerName)
@@ -84,7 +85,17 @@ public class AksClusterManager {
                 .withLogRotation()
                 .build();
 
-        ContainerLifecycleManager.ContainerInfo info = lifecycleManager.createAndStart(spec);
+        ContainerLifecycleManager.ContainerInfo info;
+        try {
+            info = lifecycleManager.createAndStart(spec);
+        } catch (RuntimeException e) {
+            // Only dispose a volume THIS start created — a pre-existing one may hold a
+            // previous cluster's k3s state and must survive a transient start failure.
+            if (volumeCreatedByThisStart) {
+                lifecycleManager.removeVolume(volumeName);
+            }
+            throw e;
+        }
         cluster.setContainerId(info.containerId());
 
         if (containerDetector.isRunningInContainer()) {

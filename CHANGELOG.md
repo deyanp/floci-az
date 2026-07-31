@@ -22,7 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `floci-az.docker.resource-namespace` (`FLOCI_AZ_DOCKER_RESOURCE_NAMESPACE`) inserts a
   namespace into child container/volume names (`floci-az-<ns>-...`) and a
   `floci_namespace` label, for running multiple emulator processes against one Docker
-  daemon. Note: with a namespace set, the Event Hubs broker certificate SAN
+  daemon. Docker volume labels are immutable, so volumes created by earlier versions
+  keep no labels until recreated (the AKS k3s volume is deleted on shutdown by default,
+  so this resolves itself); such volumes can be listed with
+  `docker volume ls --filter name=floci-az-` and removed manually if needed. Note: with a namespace set, the Event Hubs broker certificate SAN
   (`floci-az-artemis`) does not cover the namespaced container name for in-network TLS
   clients — connect via `localhost` in that setup.
 
