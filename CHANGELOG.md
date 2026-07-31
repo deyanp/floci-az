@@ -7,8 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-31
+
 ### Added
 
+- **blob (ADLS):** user delegation key vending — `POST /?restype=service&comp=userdelegationkey`
+  behind bearer auth returns the spec-exact `UserDelegationKey` XML with a deterministic
+  per-account signing key, and ARM storage accounts expose the `dfs` primary endpoint, so
+  `azure-storage-file-datalake` clients can mint and use user-delegation SAS end to end ([#122](https://github.com/floci-io/floci-az/pull/122))
+- **mysql / mariadb:** Azure Database for MySQL (Flexible Server, `Microsoft.DBforMySQL/flexibleServers`)
+  and Azure Database for MariaDB (Single Server, `Microsoft.DBforMariaDB/servers`) emulation — server
+  CRUD, databases, firewall rules, configurations, checkNameAvailability, and a `/connect`
+  convenience endpoint, backed by real `mysql:8.0` / `mariadb:10.11` sidecar containers with
+  protocol-handshake readiness, admin grants matching a real Azure admin, in-place `ALTER USER`
+  password rotation, and container rehydration after emulator restarts; plus a cross-resource
+  Monitor **diagnostic settings** extension (`{resourceUri}/providers/microsoft.insights/diagnosticSettings`).
+  Continues [#104](https://github.com/floci-io/floci-az/pull/104) with original authorship preserved
+- **cosmos:** custom container indexing policies with Azure-parity composite-index enforcement. A client-supplied `indexingPolicy` (included/excluded paths, composite indexes) on container create is normalized the way Azure does (defaults filled, composite path `order` defaulting to `ascending`), persisted, and returned on container read; container **replace** (`PUT /dbs/{db}/colls/{coll}`) is now supported for updating the policy, with `id` and `partitionKey` immutable as in Azure. Queries with an `ORDER BY` over two or more properties (or mixed sort directions) now fail with `400 BadRequest` ("The order by query does not have a corresponding composite index that it can be served from", code `SC2104`) unless the container has a composite index matching the clause exactly — same paths, same sequence, same length, directions matching exactly or all-inverted — so queries that would be rejected in production fail locally too ([#127](https://github.com/floci-io/floci-az/issues/127))
+- **Network**: realistic property synthesis for `Microsoft.Network` load balancers
+  (top-level `sku` round-trip, frontend/rule/pool ARM IDs), network security groups
+  (rule IDs, the six real-Azure `defaultSecurityRules`, standalone `securityRules`
+  child endpoint), and application gateways (child sub-resource IDs,
+  `operationalState`), plus the `backendAddressPools` child endpoint — enabling
+  `azurerm_lb*`, `azurerm_network_security_*`, and `azurerm_application_gateway`
+  Terraform/OpenTofu flows.
+- **servicebus:** subscription rules and topic filters — the `/{topic}/subscriptions/{sub}/rules[/{rule}]` management-plane endpoints (create/get/list/delete, ATOM `RuleDescription` wire format with `CorrelationFilter`/`SqlFilter`/`TrueFilter`/`FalseFilter` and `SqlRuleAction` bodies), Azure's implicit `$Default` TrueFilter rule (auto-created per subscription, replaceable via the delete-then-add SDK flow or a `DefaultRuleDescription` in the subscription create body), and broker-side filter evaluation: rules compile to Artemis SQL92 queue selectors (`CorrelationId`→`JMSCorrelationID`, `Label`/`Subject`→`JMSType`, `SessionId`→`JMSXGroupID`, application properties by name, with typed int/long/double/boolean correlation values), multiple rules OR-combine into a single delivery, no rules delivers nothing, and rule changes update the queue filter in place (`updateQueue`) without dropping routed messages or kicking receivers. Filters on `MessageId`/`To`/`ReplyTo`/`ReplyToSessionId`/`ContentType` are rejected with 400 (no broker-side AMQP mapping); `SqlRuleAction` is stored/echoed but not applied to delivered messages ([#124](https://github.com/floci-io/floci-az/issues/124))
 - **docker:** every emulator-created container and volume is now labelled `floci=true`
   (umbrella across the Floci emulators) and `floci_emulator=floci-az` (per-emulator
   discriminator), applied centrally in the container lifecycle layer — so
@@ -29,21 +52,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`floci-az-artemis`) does not cover the namespaced container name for in-network TLS
   clients — connect via `localhost` in that setup.
 
-### Added
-
-- **Network**: realistic property synthesis for `Microsoft.Network` load balancers
-  (top-level `sku` round-trip, frontend/rule/pool ARM IDs), network security groups
-  (rule IDs, the six real-Azure `defaultSecurityRules`, standalone `securityRules`
-  child endpoint), and application gateways (child sub-resource IDs,
-  `operationalState`), plus the `backendAddressPools` child endpoint — enabling
-  `azurerm_lb*`, `azurerm_network_security_*`, and `azurerm_application_gateway`
-  Terraform/OpenTofu flows.
-- **servicebus:** subscription rules and topic filters — the `/{topic}/subscriptions/{sub}/rules[/{rule}]` management-plane endpoints (create/get/list/delete, ATOM `RuleDescription` wire format with `CorrelationFilter`/`SqlFilter`/`TrueFilter`/`FalseFilter` and `SqlRuleAction` bodies), Azure's implicit `$Default` TrueFilter rule (auto-created per subscription, replaceable via the delete-then-add SDK flow or a `DefaultRuleDescription` in the subscription create body), and broker-side filter evaluation: rules compile to Artemis SQL92 queue selectors (`CorrelationId`→`JMSCorrelationID`, `Label`/`Subject`→`JMSType`, `SessionId`→`JMSXGroupID`, application properties by name, with typed int/long/double/boolean correlation values), multiple rules OR-combine into a single delivery, no rules delivers nothing, and rule changes update the queue filter in place (`updateQueue`) without dropping routed messages or kicking receivers. Filters on `MessageId`/`To`/`ReplyTo`/`ReplyToSessionId`/`ContentType` are rejected with 400 (no broker-side AMQP mapping); `SqlRuleAction` is stored/echoed but not applied to delivered messages ([#124](https://github.com/floci-io/floci-az/issues/124))
-
 ### Fixed
 
+- **storage:** blob, queue, and table service-properties requests now return proper
+  `StorageServiceProperties` XML with spec-correct statuses (Get 200 / Set 202) instead of a
+  Java `toString` body ([#131](https://github.com/floci-io/floci-az/issues/131),
+  [#132](https://github.com/floci-io/floci-az/issues/132))
+- **blob:** unimplemented `comp` operations on `PUT /{container}/{blob}` (lease, snapshot,
+  properties, tier, tags, page, appendblock) and header-discriminated CopyBlob / Data Lake
+  rename no longer fall through to PutBlob — previously they replaced the blob content with
+  the (usually empty) request body and answered 201; they now return `501 NotImplemented`
+  in the Azure error shape ([#155](https://github.com/floci-io/floci-az/pull/155))
+- **servicebus:** the CBS responder no longer exhausts file descriptors when the broker is
+  unreachable — the reconnect backoff sat in a catch block that Proton's normally-returning
+  `reactor.run()` never reached, so the loop re-created reactors (and their selectors/pipes)
+  at CPU speed ([#154](https://github.com/floci-io/floci-az/pull/154))
+- **email:** the ACS Email send operation now matches the real operation contract so the
+  Azure SDKs can poll a send to completion ([#148](https://github.com/floci-io/floci-az/pull/148))
+- **core:** unified ARM provider dispatch with strict ARM body parsing ([#118](https://github.com/floci-io/floci-az/pull/118));
+  bare Key Vault deleted-* collection routes resolve and disabled services report `503` ([#114](https://github.com/floci-io/floci-az/pull/114))
 - **servicebus:** ATOM feed responses (queues/topics/subscriptions list) no longer embed an XML prolog inside every `<entry>`, which made the feed malformed XML for strict parsers
-- **cosmos:** custom container indexing policies with Azure-parity composite-index enforcement. A client-supplied `indexingPolicy` (included/excluded paths, composite indexes) on container create is normalized the way Azure does (defaults filled, composite path `order` defaulting to `ascending`), persisted, and returned on container read; container **replace** (`PUT /dbs/{db}/colls/{coll}`) is now supported for updating the policy, with `id` and `partitionKey` immutable as in Azure. Queries with an `ORDER BY` over two or more properties (or mixed sort directions) now fail with `400 BadRequest` ("The order by query does not have a corresponding composite index that it can be served from", code `SC2104`) unless the container has a composite index matching the clause exactly — same paths, same sequence, same length, directions matching exactly or all-inverted — so queries that would be rejected in production fail locally too ([#127](https://github.com/floci-io/floci-az/issues/127))
 - **tls:** the emulator now starts with `FLOCI_AZ_TLS_ENABLED=true` on Windows hosts. `TlsConfigSource` fed native backslash paths into `quarkus.http.ssl.certificate.*`, and SmallRye Config treats backslashes in property values as escape characters, so startup died with `NoSuchFileException: D:Devfloci-az.datatls...`. Certificate and key paths (generated and user-provided) are now emitted with forward slashes on Windows, which the Windows file APIs accept; on other platforms paths are passed through untouched since a backslash is a legal filename character there
 - **blob:** `Get Blob` / `Get Blob Properties` now return the `x-ms-creation-time`, `x-ms-lease-status`, `x-ms-lease-state`, and `x-ms-server-encrypted` response headers that Azure always sends, and `Get Container Properties` now returns `x-ms-lease-state` / `x-ms-lease-status`. The Azure SDK for C++ (`azure-storage-blobs` 12.18.0) reads these unconditionally (`std::map::at()`) when deserialising Download, GetProperties, and GetContainerProperties responses, so their absence threw `std::out_of_range` and crashed the client process; the Java, Python, and Node SDKs map them to nullable fields and were unaffected, which is why the existing compatibility suites stayed green. Creation time is now recorded when a blob is written and preserved across metadata updates and overwrites, so it no longer tracks last-modified. Leases remain unmodelled: the lease headers report the fixed values of an unleased blob or container. `Content-Range` is also no longer sent on full (`200 OK`) downloads, matching the Azure spec, which scopes it to range requests ([#145](https://github.com/floci-io/floci-az/issues/145))
 
@@ -269,6 +297,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Single unified port `4577` for all services
 
 [Unreleased]: https://github.com/floci-io/floci-az/compare/0.9.0...HEAD
+[0.10.0]: https://github.com/floci-io/floci-az/compare/0.9.0...0.10.0
 [0.9.0]: https://github.com/floci-io/floci-az/compare/0.8.0...0.9.0
 [0.8.0]: https://github.com/floci-io/floci-az/compare/0.7.0...0.8.0
 [0.7.0]: https://github.com/floci-io/floci-az/compare/0.6.0...0.7.0
