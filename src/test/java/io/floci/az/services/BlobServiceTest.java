@@ -151,7 +151,11 @@ public class BlobServiceTest {
 
         assertThat(XmlParser.extractFirst(response, "SignedStart", null),
                 matchesPattern(ISO_UTC_SECONDS));
-        assertThat(XmlParser.extractFirst(response, "SignedExpiry", null), equalTo(expiry));
+        // Compare instants, not strings: OffsetDateTime.toString() omits the seconds field
+        // when it is :00, so a string comparison fails whenever the test runs at a
+        // zero-second wall-clock instant (1-in-60 flake).
+        assertThat(OffsetDateTime.parse(XmlParser.extractFirst(response, "SignedExpiry", null)).toInstant(),
+                equalTo(OffsetDateTime.parse(expiry).toInstant()));
     }
 
     @Test
