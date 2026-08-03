@@ -77,7 +77,8 @@ public class EmbeddedDnsServer {
         try {
             String myIp = InetAddress.getLocalHost().getHostAddress();
             upstreamDnsServers = composeUpstreams(readResolvConfNameservers(),
-                    config.dns().containerFallbackServers());
+                    config.dns().containerFallbackServers(),
+                    config.dns().containerFallbackEnabled());
 
             suffixes.addAll(BUILTIN_SUFFIXES);
             config.hostname().ifPresent(suffixes::add);
@@ -264,9 +265,12 @@ public class EmbeddedDnsServer {
      * resolver(s) from {@code /etc/resolv.conf} first (or Docker's embedded resolver as a
      * baseline when none are usable), then the configured public fallbacks. The fallbacks let
      * public names resolve even when the resolv.conf resolver does not answer, mirroring the
-     * {@code --dns <floci-az IP> --dns 8.8.8.8} workaround.
+     * {@code --dns <floci-az IP> --dns 8.8.8.8} workaround. When {@code fallbackEnabled} is
+     * {@code false} (offline / locked-down networks), the public fallbacks are omitted so no
+     * query ever leaves for an external resolver.
      */
-    static List<String> composeUpstreams(List<String> resolvConf, List<String> fallbacks) {
+    static List<String> composeUpstreams(List<String> resolvConf, List<String> fallbacks,
+                                         boolean fallbackEnabled) {
         SequencedSet<String> ordered = new LinkedHashSet<>();
         for (String server : resolvConf) {
             if (isUsableUpstream(server)) {
@@ -276,7 +280,7 @@ public class EmbeddedDnsServer {
         if (ordered.isEmpty()) {
             ordered.add(FALLBACK_UPSTREAM);
         }
-        if (fallbacks != null) {
+        if (fallbackEnabled && fallbacks != null) {
             for (String server : fallbacks) {
                 if (isUsableUpstream(server)) {
                     ordered.add(server.trim());

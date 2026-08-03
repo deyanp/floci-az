@@ -168,14 +168,14 @@ class EmbeddedDnsServerTest {
     @Test
     void composeUpstreams_resolvConfFirstThenFallbacks() {
         List<String> upstreams = EmbeddedDnsServer.composeUpstreams(
-                List.of("192.168.65.7"), List.of("8.8.8.8", "8.8.4.4"));
+                List.of("192.168.65.7"), List.of("8.8.8.8", "8.8.4.4"), true);
         assertEquals(List.of("192.168.65.7", "8.8.8.8", "8.8.4.4"), upstreams);
     }
 
     @Test
     void composeUpstreams_usesDockerResolverBaselineWhenResolvConfEmpty() {
         List<String> upstreams = EmbeddedDnsServer.composeUpstreams(
-                List.of(), List.of("8.8.8.8"));
+                List.of(), List.of("8.8.8.8"), true);
         // Docker's embedded resolver is the baseline, then the configured fallback.
         assertEquals(List.of("127.0.0.11", "8.8.8.8"), upstreams);
     }
@@ -183,21 +183,37 @@ class EmbeddedDnsServerTest {
     @Test
     void composeUpstreams_skipsLoopbackAndBlankEntries() {
         List<String> upstreams = EmbeddedDnsServer.composeUpstreams(
-                List.of("127.0.0.1", "  ", "10.0.0.2"), List.of("", "8.8.8.8"));
+                List.of("127.0.0.1", "  ", "10.0.0.2"), List.of("", "8.8.8.8"), true);
         assertEquals(List.of("10.0.0.2", "8.8.8.8"), upstreams);
     }
 
     @Test
     void composeUpstreams_dedupesAcrossResolvConfAndFallbacks() {
         List<String> upstreams = EmbeddedDnsServer.composeUpstreams(
-                List.of("8.8.8.8"), List.of("8.8.8.8", "8.8.4.4"));
+                List.of("8.8.8.8"), List.of("8.8.8.8", "8.8.4.4"), true);
         assertEquals(List.of("8.8.8.8", "8.8.4.4"), upstreams);
     }
 
     @Test
     void composeUpstreams_toleratesNullFallbacks() {
-        List<String> upstreams = EmbeddedDnsServer.composeUpstreams(List.of("10.0.0.2"), null);
+        List<String> upstreams = EmbeddedDnsServer.composeUpstreams(List.of("10.0.0.2"), null, true);
         assertEquals(List.of("10.0.0.2"), upstreams);
+    }
+
+    @Test
+    void composeUpstreams_omitsPublicFallbacksWhenDisabled() {
+        // FLOCI_AZ_DNS_CONTAINER_FALLBACK_ENABLED=false: no query may leave for a public
+        // resolver in offline / locked-down networks.
+        List<String> upstreams = EmbeddedDnsServer.composeUpstreams(
+                List.of("192.168.65.7"), List.of("8.8.8.8", "8.8.4.4"), false);
+        assertEquals(List.of("192.168.65.7"), upstreams);
+    }
+
+    @Test
+    void composeUpstreams_disabledFallbacksStillKeepDockerResolverBaseline() {
+        List<String> upstreams = EmbeddedDnsServer.composeUpstreams(
+                List.of(), List.of("8.8.8.8"), false);
+        assertEquals(List.of("127.0.0.11"), upstreams);
     }
 
     // ── forwarding — response buffer size regression guard ────────────────────

@@ -427,21 +427,23 @@ public interface EmulatorConfig {
         Optional<List<String>> extraSuffixes();
 
         /**
-         * When {@code true} (default), the configured {@link #containerFallbackServers()} may be
-         * appended after floci-az's embedded DNS as secondary resolvers for spawned function
-         * containers. This gives them a real secondary resolver so public hostnames still resolve
-         * if floci-az's embedded forwarder cannot answer — mirroring the
+         * When {@code true} (default), the configured {@link #containerFallbackServers()} are
+         * appended to the upstream list of floci-az's embedded DNS forwarder (after the
+         * resolv.conf resolvers) and may be appended after floci-az's embedded DNS as secondary
+         * resolvers for spawned function containers. This keeps public hostnames resolving even
+         * when the resolv.conf resolver cannot answer — mirroring the
          * {@code docker run --dns <floci-az IP> --dns 8.8.8.8} workaround.
          *
          * <p>Disable (via {@code FLOCI_AZ_DNS_CONTAINER_FALLBACK_ENABLED=false}) in offline or
-         * locked-down networks where the public resolvers are unreachable/blocked.
+         * locked-down networks where the public resolvers are unreachable/blocked; no DNS query
+         * then ever leaves for an external resolver.
          */
         @WithDefault("true")
         boolean containerFallbackEnabled();
 
         /**
-         * Ordered list of public DNS resolvers used as the fallback upstream for floci-az's
-         * embedded DNS forwarder and (when {@link #containerFallbackEnabled()}) as the secondary
+         * Ordered list of public DNS resolvers used (when {@link #containerFallbackEnabled()})
+         * as the fallback upstream for floci-az's embedded DNS forwarder and as the secondary
          * resolvers for spawned containers.
          *
          * <p>Via environment variable (comma-separated):
