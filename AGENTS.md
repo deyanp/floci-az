@@ -375,6 +375,17 @@ Conventional commits:
 
 Do not add `Co-Authored-By` trailers for AI tools in commit messages.
 
+Releases:
+
+- Releases are cut by dispatching the "Release Cut" workflow
+  (`.github/workflows/release-cut.yml`) from `main` — semantic-release computes
+  the next version from Conventional Commits, updates `pom.xml`/`CHANGELOG.md`,
+  tags, and publishes the GitHub Release; the tag push triggers `release.yml`.
+- The `GH_TOKEN` repo secret must be a PAT (fine-grained, contents: write) —
+  tags pushed with the default `GITHUB_TOKEN` do not trigger `release.yml`.
+- Use the workflow's `dry-run` input to preview the next version and notes
+  without tagging.
+
 ---
 
 ## Azure Protocol References

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **docker:** compatibility image variant (`floci/floci-az:<version>-compat`,
+  `:latest-compat`, `:nightly-compat`) — the emulator image plus the Azure CLI
+  (`az`) and the `azfloci` helper baked in, published from the release and
+  nightly workflows alongside the plain image
+- **release:** one-button release automation — semantic-release configuration
+  (`.releaserc.json`, main-only branch model), Conventional Commits PR
+  enforcement (`conventional-commits.yml`), and a dispatchable "Release Cut"
+  workflow (`release-cut.yml`, with a `dry-run` input) that computes the next
+  version from commit history, updates `pom.xml` and `CHANGELOG.md`, tags, and
+  publishes the GitHub Release; the tag push triggers the existing `release.yml`
+
 ## [0.10.0] - 2026-07-31
 
 ### Added
