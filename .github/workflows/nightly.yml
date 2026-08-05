@@ -5,7 +5,8 @@ name: Nightly
 # Can also be triggered manually.
 #
 # Published tags:
-#   floci/floci-az:nightly   floci/floci-az:nightly-mmddyyyy
+#   Native:  floci/floci-az:nightly          floci/floci-az:nightly-mmddyyyy
+#   Compat:  floci/floci-az:nightly-compat   floci/floci-az:nightly-mmddyyyy-compat
 #
 # Required secrets: DOCKERHUB_USERNAME, DOCKERHUB_TOKEN
 
@@ -104,9 +105,9 @@ jobs:
           if-no-files-found: warn
           retention-days: 1
 
-  # ── Push native Docker image (multi-arch manifest) ────────────────────────
+  # ── Push native + compat Docker images ───────────────────────────────────
   push-native:
-    name: Push native Docker image
+    name: Push native and compat Docker images
     needs: [prepare, build-native-amd64, build-native-arm64]
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -159,6 +160,30 @@ jobs:
           tags: |
             floci/floci-az:nightly
             floci/floci-az:nightly-${{ needs.prepare.outputs.version }}
+          build-args: |
+            VERSION=nightly-${{ needs.prepare.outputs.version }}
+          labels: |
+            org.opencontainers.image.version=nightly-${{ needs.prepare.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ steps.created.outputs.created }}
+            version=nightly-${{ needs.prepare.outputs.version }}
+            build-date=${{ steps.created.outputs.created }}
+            vcs-ref=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push compat nightly image
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.source_date.outputs.epoch }}
+        with:
+          context: .
+          file: docker/Dockerfile.compat
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            floci/floci-az:nightly-compat
+            floci/floci-az:nightly-${{ needs.prepare.outputs.version }}-compat
           build-args: |
             VERSION=nightly-${{ needs.prepare.outputs.version }}
           labels: |
