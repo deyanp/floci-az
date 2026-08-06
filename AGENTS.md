@@ -316,7 +316,7 @@ When adding a new HTTP-based service:
 7. Add storage wiring if needed
 8. Update `BannerLogger`
 9. Add compatibility tests
-10. Update docs (`docs/services/<svc>.md`, `docs/services/index.md`, `mkdocs.yml`, `README.md`, `CHANGELOG.md`)
+10. Update docs (`docs/services/<svc>.md`, `docs/services/index.md`, `mkdocs.yml`, `README.md`)
 
 When adding a sidecar-based service, additionally:
 
