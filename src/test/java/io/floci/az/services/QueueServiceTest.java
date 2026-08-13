@@ -33,6 +33,24 @@ public class QueueServiceTest {
     }
 
     @Test
+    void setQueueServicePropertiesReturns202() {
+        given()
+            .contentType("application/xml")
+            .body("<StorageServiceProperties><Logging><Version>1.0</Version></Logging></StorageServiceProperties>")
+            .when().put("/{account}?restype=service&comp=properties", ACCOUNT)
+            .then()
+            .statusCode(202);
+    }
+
+    @Test
+    void postQueueServicePropertiesIsNotImplemented() {
+        given()
+            .when().post("/{account}?restype=service&comp=properties", ACCOUNT)
+            .then()
+            .statusCode(501);
+    }
+
+    @Test
     void createAndDeleteQueue() {
         given()
             .when().put("/{account}/{queue}", ACCOUNT, QUEUE)

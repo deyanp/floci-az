@@ -93,8 +93,12 @@ public class QueueServiceHandler implements AzureServiceHandler, Resettable {
             } else if ("service".equals(query.get("restype")) && "properties".equals(query.get("comp"))) {
                 if ("GET".equalsIgnoreCase(method) || "HEAD".equalsIgnoreCase(method)) {
                     response = getQueueServiceProperties();
+                } else if ("PUT".equalsIgnoreCase(method)) {
+                    response = Response.accepted().build();
                 } else {
-                    response = Response.ok().build();
+                    response = new AzureErrorResponse(
+                            "NotImplemented", "The requested operation is not implemented.")
+                            .toXmlResponse(501);
                 }
             } else {
                 response = new AzureErrorResponse("NotImplemented", "The requested operation is not implemented.")

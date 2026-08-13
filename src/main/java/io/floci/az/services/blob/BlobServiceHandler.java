@@ -114,8 +114,10 @@ public class BlobServiceHandler implements AzureServiceHandler, Resettable {
             } else if ("service".equals(query.get("restype")) && "properties".equals(query.get("comp"))) {
                 if ("GET".equalsIgnoreCase(method) || "HEAD".equalsIgnoreCase(method)) {
                     response = getBlobServiceProperties();
+                } else if ("PUT".equalsIgnoreCase(method)) {
+                    response = Response.accepted().build();
                 } else {
-                    response = Response.ok().build();
+                    response = notImplemented();
                 }
             } else {
                 response = notImplemented();

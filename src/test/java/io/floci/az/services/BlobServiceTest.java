@@ -42,6 +42,24 @@ public class BlobServiceTest {
     }
 
     @Test
+    void setBlobServicePropertiesReturns202() {
+        given()
+            .contentType("application/xml")
+            .body("<StorageServiceProperties><Logging><Version>1.0</Version></Logging></StorageServiceProperties>")
+            .when().put("/{account}?restype=service&comp=properties", ACCOUNT)
+            .then()
+            .statusCode(202);
+    }
+
+    @Test
+    void postBlobServicePropertiesIsNotImplemented() {
+        given()
+            .when().post("/{account}?restype=service&comp=properties", ACCOUNT)
+            .then()
+            .statusCode(501);
+    }
+
+    @Test
     void createAndDeleteContainer() {
         given()
             .when().put("/{account}/{container}?restype=container", ACCOUNT, CONTAINER)
