@@ -5,6 +5,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.regex.Matcher;
@@ -97,6 +98,35 @@ public class BlobServiceTest {
             .statusCode(200)
             .header("x-ms-meta-owner", "compat")
             .body(equalTo(BLOB_CONTENT));
+    }
+
+    @Test
+    void putBlobPersistsBlobHttpHeaders() {
+        given().put("/{account}/{container}?restype=container", ACCOUNT, CONTAINER);
+
+        given()
+            .header("x-ms-blob-type", "BlockBlob")
+            .header("x-ms-blob-content-type", "image/png")
+            .header("x-ms-blob-cache-control", "public, max-age=31536000")
+            .header("x-ms-blob-content-disposition", "inline; filename=image.png")
+            .header("x-ms-blob-content-encoding", "gzip")
+            .header("x-ms-blob-content-language", "en-GB")
+            .header("x-ms-blob-content-md5", "bLRINaECD0Zc/ikzY3bBuQ==")
+            .header("Content-Type", "application/octet-stream")
+            .body(BLOB_CONTENT.getBytes(StandardCharsets.UTF_8))
+            .when().put("/{account}/{container}/{blob}", ACCOUNT, CONTAINER, BLOB)
+            .then().statusCode(201);
+
+        given()
+            .when().head("/{account}/{container}/{blob}", ACCOUNT, CONTAINER, BLOB)
+            .then()
+            .statusCode(200)
+            .header("Content-Type", startsWith("image/png"))
+            .header("Cache-Control", equalTo("public, max-age=31536000"))
+            .header("Content-Disposition", equalTo("inline; filename=image.png"))
+            .header("Content-Encoding", equalTo("gzip"))
+            .header("Content-Language", equalTo("en-GB"))
+            .header("Content-MD5", equalTo("bLRINaECD0Zc/ikzY3bBuQ=="));
     }
 
     @Test
@@ -483,6 +513,30 @@ public class BlobServiceTest {
     }
 
     @Test
+    void rangeRequestOmitsStoredContentMd5() {
+        given().put("/{account}/{container}?restype=container", ACCOUNT, CONTAINER);
+        given()
+            .header("x-ms-blob-type", "BlockBlob")
+            .header("x-ms-blob-content-md5", "eB5eJF1ptWaXm4bijSPyxw==")
+            .body("0123456789")
+            .put("/{account}/{container}/{blob}", ACCOUNT, CONTAINER, BLOB);
+
+        given()
+            .when().get("/{account}/{container}/{blob}", ACCOUNT, CONTAINER, BLOB)
+            .then()
+            .statusCode(200)
+            .header("Content-MD5", equalTo("eB5eJF1ptWaXm4bijSPyxw=="));
+
+        given()
+            .header("Range", "bytes=2-5")
+            .when().get("/{account}/{container}/{blob}", ACCOUNT, CONTAINER, BLOB)
+            .then()
+            .statusCode(206)
+            .header("Content-MD5", nullValue())
+            .body(equalTo("2345"));
+    }
+
+    @Test
     void invalidRangeReturns416() {
         given().put("/{account}/{container}?restype=container", ACCOUNT, CONTAINER);
         given()
@@ -634,6 +688,36 @@ public class BlobServiceTest {
             .statusCode(200)
             .header("x-ms-creation-time", not(emptyOrNullString()))
             .header("x-ms-server-encrypted", "true");
+    }
+
+    @Test
+    void committedBlockBlobPersistsBlobHttpHeaders() {
+        given().put("/{account}/{container}?restype=container", ACCOUNT, CONTAINER);
+        String blockId = java.util.Base64.getEncoder()
+            .encodeToString("block-1".getBytes(StandardCharsets.UTF_8));
+
+        given()
+            .body("chunk")
+            .when().put("/{account}/{container}/{blob}?comp=block&blockid={id}",
+                    ACCOUNT, CONTAINER, BLOB, blockId)
+            .then().statusCode(201);
+
+        given()
+            .header("x-ms-blob-content-type", "text/plain")
+            .header("x-ms-blob-cache-control", "public, max-age=60")
+            .header("x-ms-blob-content-md5", "XrY7u+Ae7tCTyyK7j1rNww==")
+            .contentType("application/xml")
+            .body("<BlockList><Latest>" + blockId + "</Latest></BlockList>")
+            .when().put("/{account}/{container}/{blob}?comp=blocklist", ACCOUNT, CONTAINER, BLOB)
+            .then().statusCode(201);
+
+        given()
+            .when().head("/{account}/{container}/{blob}", ACCOUNT, CONTAINER, BLOB)
+            .then()
+            .statusCode(200)
+            .header("Content-Type", startsWith("text/plain"))
+            .header("Cache-Control", equalTo("public, max-age=60"))
+            .header("Content-MD5", equalTo("XrY7u+Ae7tCTyyK7j1rNww=="));
     }
 
     private static void putTestBlob(String content) {
