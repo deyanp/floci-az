@@ -164,7 +164,7 @@ public class AzureRoutingFilter {
 
     /** Service types dispatched by a stage directly rather than named in a handler's routing table. */
     private static final Set<String> LITERAL_ROUTE_SERVICE_TYPES = Set.of(
-        "managedidentity", "entra", "monitor", "keyvault", "email", "arm", "servicebus", "cosmos",
+        "managedidentity", "entra", "graph", "monitor", "keyvault", "email", "arm", "servicebus", "cosmos",
         "blob", "queue" // the storage fallback in resolveStorageServiceType
     );
 
@@ -381,13 +381,15 @@ public class AzureRoutingFilter {
 
     /**
      * Microsoft Entra ID (OpenID Connect provider) — tenant-rooted paths at the ARM base URL:
-     * {@code {tenant}/oauth2/v2.0/token}, {@code {tenant}/oauth2/token},
-     * {@code {tenant}/discovery/v2.0/keys}, {@code {tenant}[/v2.0]/.well-known/openid-configuration},
+     * {@code {tenant}/oauth2/v2.0/authorize}, {@code {tenant}/oauth2/v2.0/token},
+     * {@code {tenant}/oauth2/token}, {@code {tenant}/discovery/v2.0/keys},
+     * {@code {tenant}[/v2.0]/.well-known/openid-configuration},
      * where {@code {tenant}} is a tenant id or common/organizations/consumers.
      */
     private Outcome routeEntra(RoutingContext ctx) {
         String path = ctx.path();
         boolean isEntraPath = path.contains("oauth2/v2.0/token") || path.endsWith("oauth2/token")
+            || path.contains("oauth2/v2.0/authorize")
             || path.endsWith("discovery/v2.0/keys")
             || path.endsWith(".well-known/openid-configuration");
         if (!isEntraPath) {
@@ -406,9 +408,15 @@ public class AzureRoutingFilter {
         return ctx.path().startsWith("metadata/endpoints") ? Fallthrough.TO_JAX_RS : Fallthrough.TO_NEXT_STAGE;
     }
 
-    /** Microsoft Graph API — called by the azurerm provider for service principal discovery. */
+    /**
+     * Microsoft Graph API — a narrow slice at {@code /v1.0/...}: service principal discovery (used by
+     * the azurerm provider) plus group-membership management ({@code GraphServiceHandler}).
+     */
     private Outcome routeMicrosoftGraph(RoutingContext ctx) {
-        return ctx.path().startsWith("v1.0/") ? Fallthrough.TO_JAX_RS : Fallthrough.TO_NEXT_STAGE;
+        if (!ctx.path().startsWith("v1.0/")) {
+            return Fallthrough.TO_NEXT_STAGE;
+        }
+        return dispatchOrServiceDisabled(ctx, "graph", "graph", ctx.path());
     }
 
     private Outcome routeMonitor(RoutingContext ctx) {

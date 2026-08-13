@@ -7,6 +7,13 @@ quarkus:
     host: 0.0.0.0
     limits:
       max-body-size: 2G
+    cors:
+      # Permissive by default, matching the emulator's dev-only stance: a browser SPA (msal-react)
+      # calling the Entra authorize/token endpoints from its own origin needs CORS + a handled
+      # OPTIONS preflight, which the Vert.x-level CORS filter answers before any request reaches
+      # AzureRoutingFilter or a JAX-RS resource.
+      enabled: true
+      origins: /.*/
   native:
     additional-build-args: >-
       --initialize-at-run-time=org.apache.hc.client5.http.impl.auth.NTLMEngineImpl,
@@ -207,6 +214,8 @@ floci-az:
       token-lifetime-seconds: 3599
       validate-tokens: false        # true = BearerTokenVerifier validates signature/claims (default off: permissive dev auth)
       # signing-key-path:           # optional; default {storage.persistent-path}/entra
+    graph:
+      enabled: true                 # Microsoft Graph slice at /v1.0/...: servicePrincipals discovery + group membership
     # docker-network:  # optional: shared Docker network for sidecar containers
     email:
       enabled: true
