@@ -143,6 +143,10 @@ public class CosmosQueryEngine {
             Pattern.compile("(?i)\\bSELECT\\s+TOP\\s+(\\d+)");
     private static final Pattern OFFSET_LIMIT_PATTERN =
             Pattern.compile("(?i)\\bOFFSET\\s+(\\d+)\\s+LIMIT\\s+(\\d+)");
+    private static final Pattern CORRELATED_EXISTS_PATTERN = Pattern.compile(
+            "(?is)EXISTS\\s*\\(\\s*SELECT\\s+VALUE\\s+(\\w+)\\s+"
+                    + "FROM\\s+\\1\\s+IN\\s+([\\w.]+)"
+                    + "(?:\\s+WHERE\\s+(.+))?\\s*\\)");
 
     ParsedQuery parse(String sql) {
         String upper = sql.toUpperCase();
@@ -288,6 +292,19 @@ public class CosmosQueryEngine {
         pred = pred.trim();
         Matcher m;
 
+        // EXISTS(SELECT VALUE item FROM item IN c.items WHERE item.field = value)
+        m = CORRELATED_EXISTS_PATTERN.matcher(pred);
+        if (m.matches()) {
+            String itemAlias = m.group(1);
+            String sourcePath = m.group(2);
+            Object source = resolve(doc, sourcePath);
+            if (!(source instanceof List<?> items)) return false;
+            String where = m.group(3);
+            if (where == null) return !items.isEmpty();
+            String outerAlias = sourcePath.contains(".") ? sourcePath.substring(0, sourcePath.indexOf('.')) : null;
+            return items.stream().anyMatch(item -> evalExistsItem(doc, item, itemAlias, outerAlias, where));
+        }
+
         // IS_DEFINED(c.field)
         m = Pattern.compile("(?i)IS_DEFINED\\s*\\(([^)]+)\\)").matcher(pred);
         if (m.matches()) return resolve(doc, m.group(1).trim()) != null;
@@ -425,6 +442,16 @@ public class CosmosQueryEngine {
         return false;
     }
 
+    private boolean evalExistsItem(Map<String, Object> outerDocument, Object item, String itemAlias,
+                                   String outerAlias, String where) {
+        QueryScope scope = new QueryScope(outerDocument);
+        scope.bind(itemAlias, item);
+        if (outerAlias != null) {
+            scope.bind(outerAlias, outerDocument);
+        }
+        return evalExpr(scope, where);
+    }
+
     /** Convert a SQL LIKE pattern (% and _ wildcards) to a regex and match. */
     private boolean likeMatches(String value, String pattern) {
         StringBuilder sb = new StringBuilder("^");
@@ -458,16 +485,45 @@ public class CosmosQueryEngine {
     }
 
     Object resolve(Map<String, Object> doc, String path) {
-        path = stripAlias(path);
-        Object current = doc;
-        for (String seg : path.split("\\.")) {
+        String[] segments = path.split("\\.");
+        Object current;
+        int startIndex;
+        if (doc instanceof QueryScope scope && scope.hasBinding(segments[0])) {
+            current = scope.binding(segments[0]);
+            startIndex = 1;
+        } else {
+            segments = stripAlias(path).split("\\.");
+            current = doc;
+            startIndex = 0;
+        }
+        for (int i = startIndex; i < segments.length; i++) {
             if (current instanceof Map<?, ?> map) {
-                current = map.get(seg);
+                current = map.get(segments[i]);
             } else {
                 return null;
             }
         }
         return current;
+    }
+
+    private static final class QueryScope extends LinkedHashMap<String, Object> {
+        private final Map<String, Object> bindings = new HashMap<>();
+
+        private QueryScope(Map<String, Object> document) {
+            super(document);
+        }
+
+        private void bind(String alias, Object value) {
+            bindings.put(alias, value);
+        }
+
+        private boolean hasBinding(String alias) {
+            return bindings.containsKey(alias);
+        }
+
+        private Object binding(String alias) {
+            return bindings.get(alias);
+        }
     }
 
     // -----------------------------------------------------------------------
