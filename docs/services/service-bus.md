@@ -67,6 +67,17 @@ dead-lettering).
 - Rule changes update the subscription's filter in place (messages already routed to the
   subscription stay, receivers stay attached) and, as on Azure, apply to future messages only.
 
+## Message sessions
+
+Queues and subscriptions created with `RequiresSession` support Azure SDK session receivers.
+Set `SessionId` on sent messages, then use a specific-session receiver, an accept-next-session
+receiver, or a session processor. The broker translates Azure's AMQP session filter into an
+Artemis `JMSXGroupID` selector, which keeps each session on one receiver and preserves FIFO order
+within that session. Attach responses include Azure's `com.microsoft:locked-until-utc` property.
+
+Session ownership lasts for the receiver link. Session state and explicit session-lock renewal are
+not currently emulated.
+
 ## Connection String
 
 ```
@@ -98,6 +109,19 @@ with ServiceBusClient.from_connection_string(CONN) as client:
             receiver.complete_message(msg)
 ```
 
+## .NET SDK
+
+```csharp
+await using var client = new ServiceBusClient(
+    "Endpoint=sb://localhost:5673;SharedAccessKeyName=RootManageSharedAccessKey;" +
+    "SharedAccessKey=devkey;UseDevelopmentEmulator=true;");
+ServiceBusSender sender = client.CreateSender("myqueue");
+await sender.SendMessageAsync(new ServiceBusMessage("hello world"));
+```
+
+The Artemis sidecar includes the `MSSBCBS` anonymous SASL mechanism expected by
+`Azure.Messaging.ServiceBus`; authorization continues through the standard CBS link.
+
 ## Configuration
 
 ### Docker Compose
@@ -125,7 +149,7 @@ services:
 | `FLOCI_AZ_SERVICES_SERVICE_BUS_MOCKED` | `true` | Mocked mode (management plane only, no Artemis) |
 | `FLOCI_AZ_SERVICES_SERVICE_BUS_AMQP_PORT` | `5673` | Host port for AMQP (Artemis) |
 | `FLOCI_AZ_SERVICES_SERVICE_BUS_AMQP_TLS_PORT` | `5674` | Host port for AMQPS |
-| `FLOCI_AZ_SERVICES_SERVICE_BUS_ARTEMIS_IMAGE` | `apache/activemq-artemis:latest` | Artemis image |
+| `FLOCI_AZ_SERVICES_SERVICE_BUS_ARTEMIS_IMAGE` | `apache/activemq-artemis:2.44.0` | Artemis image; must match bundled protocol patches |
 | `FLOCI_AZ_SERVICES_SERVICE_BUS_MAX_DELIVERY_COUNT` | `10` | Max delivery attempts before dead-lettering |
 | `FLOCI_AZ_SERVICES_SERVICE_BUS_LOCK_DURATION_SECONDS` | `60` | Peek-lock duration |
 
@@ -139,13 +163,14 @@ floci-az:
       mocked: true              # true = management plane only, no Docker. false = real Artemis sidecar
       amqp-port: 5673
       amqp-tls-port: 5674
-      artemis-image: "apache/activemq-artemis:latest"
+      artemis-image: "apache/activemq-artemis:2.44.0"
       max-delivery-count: 10
       lock-duration-seconds: 60
 ```
 
 ## Out of scope (future work)
 
-- Sessions, scheduled/deferred messages, and auto-forwarding
+- Session state and explicit session-lock renewal
+- Deferred messages and auto-forwarding
 - Duplicate detection and message transactions
 - Geo-disaster recovery and partitioned entities

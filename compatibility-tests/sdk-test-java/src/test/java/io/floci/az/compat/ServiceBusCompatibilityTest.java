@@ -7,6 +7,7 @@ import com.azure.messaging.servicebus.ServiceBusSenderClient;
 import com.azure.messaging.servicebus.ServiceBusSessionReceiverClient;
 import com.azure.messaging.servicebus.models.ServiceBusReceiveMode;
 import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.function.Executable;
 
 import java.time.Duration;
 import java.time.OffsetDateTime;
@@ -372,6 +373,161 @@ class ServiceBusCompatibilityTest {
         }
     }
 
+    @Test
+    @DisplayName("accept-next-session preserves FIFO ordering and isolates sessions")
+    void acceptNextSessionPreservesOrder() throws Exception {
+        String queue = uniqueSessionQueue();
+        String sessionA = "next-a-" + UUID.randomUUID().toString().substring(0, 6);
+        String sessionB = "next-b-" + UUID.randomUUID().toString().substring(0, 6);
+
+        try (ServiceBusSenderClient sender = EmulatorConfig.serviceBusClientBuilder()
+                .sender().queueName(queue).buildClient()) {
+            for (int i = 0; i < 2; i++) {
+                ServiceBusMessage message = new ServiceBusMessage("a-" + i);
+                message.setSessionId(sessionA);
+                sender.sendMessage(message);
+            }
+            ServiceBusMessage message = new ServiceBusMessage("b-0");
+            message.setSessionId(sessionB);
+            sender.sendMessage(message);
+        }
+
+        try (ServiceBusSessionReceiverClient sessionReceiver = EmulatorConfig.serviceBusClientBuilder()
+                .sessionReceiver()
+                .queueName(queue)
+                .receiveMode(ServiceBusReceiveMode.PEEK_LOCK)
+                .buildClient();
+             ServiceBusReceiverClient receiver = sessionReceiver.acceptNextSession()) {
+            assertEquals(sessionA, receiver.getSessionId());
+            List<ServiceBusReceivedMessage> messages = receiver.receiveMessages(2, RECV_TIMEOUT)
+                    .stream().toList();
+            assertEquals(List.of("a-0", "a-1"), messages.stream()
+                    .map(message -> message.getBody().toString()).toList());
+            messages.forEach(receiver::complete);
+        }
+
+        try (ServiceBusSessionReceiverClient sessionReceiver = EmulatorConfig.serviceBusClientBuilder()
+                .sessionReceiver()
+                .queueName(queue)
+                .receiveMode(ServiceBusReceiveMode.PEEK_LOCK)
+                .buildClient();
+             ServiceBusReceiverClient receiver = sessionReceiver.acceptNextSession()) {
+            assertEquals(sessionB, receiver.getSessionId());
+            ServiceBusReceivedMessage message = receiver.receiveMessages(1, RECV_TIMEOUT)
+                    .stream().findFirst().orElse(null);
+            assertNotNull(message);
+            assertEquals("b-0", message.getBody().toString());
+            receiver.complete(message);
+        }
+    }
+
+    @Test
+    @DisplayName("session-enabled queues reject non-session receivers")
+    void sessionQueueRejectsNonSessionReceiver() throws Exception {
+        String queue = uniqueSessionQueue();
+
+        try (ServiceBusReceiverClient receiver = peekLockReceiver(queue)) {
+            assertReceiverRejected(
+                    () -> receiver.receiveMessages(1, Duration.ofSeconds(2)).stream().toList(),
+                    "A session receiver is required for this entity");
+        }
+    }
+
+    @Test
+    @DisplayName("non-session queues reject session receivers")
+    void nonSessionQueueRejectsSessionReceiver() throws Exception {
+        String queue = uniqueQueue();
+
+        try (ServiceBusSessionReceiverClient receiver = EmulatorConfig.serviceBusClientBuilder()
+                .sessionReceiver()
+                .queueName(queue)
+                .receiveMode(ServiceBusReceiveMode.PEEK_LOCK)
+                .buildClient()) {
+            assertReceiverRejected(receiver::acceptNextSession,
+                    "The entity is not configured to require sessions");
+        }
+    }
+
+    @Test
+    @DisplayName("session-enabled subscriptions require a session receiver")
+    void sessionSubscriptionRequiresSessionReceiver() throws Exception {
+        String topic = uniqueName("st");
+        String subscription = "session-sub";
+        String sessionId = "sub-session-" + UUID.randomUUID().toString().substring(0, 6);
+        EmulatorConfig.ensureServiceBusTopic(topic);
+        EmulatorConfig.ensureServiceBusSubscription(topic, subscription, true);
+
+        try (ServiceBusSenderClient sender = EmulatorConfig.serviceBusClientBuilder()
+                .sender().topicName(topic).buildClient()) {
+            ServiceBusMessage message = new ServiceBusMessage("subscription-session-message");
+            message.setSessionId(sessionId);
+            sender.sendMessage(message);
+        }
+
+        try (ServiceBusReceiverClient receiver = subscriptionReceiver(topic, subscription)) {
+            assertReceiverRejected(
+                    () -> receiver.receiveMessages(1, Duration.ofSeconds(2)).stream().toList(),
+                    "A session receiver is required for this entity");
+        }
+
+        try (ServiceBusSessionReceiverClient sessionReceiver = EmulatorConfig.serviceBusClientBuilder()
+                .sessionReceiver()
+                .topicName(topic)
+                .subscriptionName(subscription)
+                .receiveMode(ServiceBusReceiveMode.PEEK_LOCK)
+                .buildClient();
+             ServiceBusReceiverClient receiver = sessionReceiver.acceptSession(sessionId)) {
+            ServiceBusReceivedMessage message = receiver.receiveMessages(1, RECV_TIMEOUT)
+                    .stream().findFirst().orElse(null);
+            assertNotNull(message);
+            assertEquals(sessionId, message.getSessionId());
+            receiver.complete(message);
+        }
+    }
+
+    @Test
+    @DisplayName("session lock expires using configured duration and can be reacquired")
+    void sessionLockExpiresAndCanBeReacquired() throws Exception {
+        String configuredDuration = System.getenv("SERVICEBUS_SESSION_LOCK_DURATION_SECONDS");
+        Assumptions.assumeTrue(configuredDuration != null,
+                "Session expiry test requires the Docker compatibility environment");
+        long lockDurationSeconds = Long.parseLong(configuredDuration);
+        String queue = uniqueSessionQueue();
+        String sessionId = "expiring-" + UUID.randomUUID().toString().substring(0, 6);
+        ServiceBusMessage sent = new ServiceBusMessage("session-lock-expiry");
+        sent.setSessionId(sessionId);
+
+        try (ServiceBusSenderClient sender = EmulatorConfig.serviceBusClientBuilder()
+                .sender().queueName(queue).buildClient()) {
+            sender.sendMessage(sent);
+        }
+
+        try (ServiceBusSessionReceiverClient sessionReceiver = EmulatorConfig.serviceBusClientBuilder()
+                .sessionReceiver()
+                .queueName(queue)
+                .receiveMode(ServiceBusReceiveMode.PEEK_LOCK)
+                .maxAutoLockRenewDuration(Duration.ZERO)
+                .buildClient();
+            ServiceBusReceiverClient receiver = sessionReceiver.acceptSession(sessionId)) {
+            assertEquals(1, receiver.receiveMessages(1, RECV_TIMEOUT).stream().count());
+            Thread.sleep(Duration.ofSeconds(lockDurationSeconds + 1));
+        }
+
+        try (ServiceBusSessionReceiverClient sessionReceiver = EmulatorConfig.serviceBusClientBuilder()
+                .sessionReceiver()
+                .queueName(queue)
+                .receiveMode(ServiceBusReceiveMode.PEEK_LOCK)
+                .maxAutoLockRenewDuration(Duration.ZERO)
+                .buildClient();
+             ServiceBusReceiverClient receiver = sessionReceiver.acceptSession(sessionId)) {
+            ServiceBusReceivedMessage message = receiver.receiveMessages(1, RECV_TIMEOUT)
+                    .stream().findFirst().orElse(null);
+            assertNotNull(message, "Unsettled message should return after the session lock expires");
+            assertEquals(sessionId, message.getSessionId());
+            receiver.complete(message);
+        }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private String uniqueQueue() throws Exception {
@@ -388,6 +544,16 @@ class ServiceBusCompatibilityTest {
 
     private static String uniqueName(String prefix) {
         return prefix + "-" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    }
+
+    private static void assertReceiverRejected(Executable operation, String expectedMessage) {
+        RuntimeException error = assertThrows(RuntimeException.class, operation);
+        Throwable root = error;
+        while (root.getCause() != null) {
+            root = root.getCause();
+        }
+        assertInstanceOf(UnsupportedOperationException.class, root);
+        assertEquals(expectedMessage, root.getMessage());
     }
 
     private void send(String queue, String payload) {

@@ -12,6 +12,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.Socket;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -36,9 +37,23 @@ public class ServiceBusNamespaceManager {
 
     private static final Logger LOG = Logger.getLogger(ServiceBusNamespaceManager.class);
 
+    static final String ARTEMIS_EXTENSION_RESOURCE = "/artemis/servicebus-artemis-extension.jar";
+    static final String PROTON_PATCH_RESOURCE = "/artemis/proton-j-0.34.1-floci-az-proton-patch.jar";
+    static final String ARTEMIS_AMQP_PATCH_RESOURCE =
+            "/artemis/artemis-amqp-protocol-2.44.0-floci-az-artemis-amqp-patch.jar";
+    private static final String ARTEMIS_EXTENSION_PATH =
+            "/var/lib/artemis-instance/lib/floci-az-servicebus-extension.jar";
+    private static final String PROTON_J_PATH = "/opt/activemq-artemis/lib/proton-j-0.34.1.jar";
+    private static final String ARTEMIS_AMQP_PATH =
+            "/opt/activemq-artemis/lib/artemis-amqp-protocol-2.44.0.jar";
     private static final int AMQP_PORT = 5672;
     private static final int AMQPS_PORT = 5671;
     private static final int JOLOKIA_PORT = 8161;
+    private static final String DEAD_LETTER_QUEUE_SUFFIX = "/$DeadLetterQueue";
+    private static final String SUBSCRIPTION_DIVERT_SUFFIX = "/$Divert";
+    private static final String TOPIC_ADDRESS_SUFFIX = "/$Topic";
+    private static final String TOPIC_DIVERT_SUFFIX = "/$TopicDivert";
+    private static final String SESSION_METADATA_PREFIX = "floci-az:servicebus-session:";
 
     /**
      * Immutable snapshot of a running namespace.
@@ -113,6 +128,12 @@ public class ServiceBusNamespaceManager {
                 "/var/lib/artemis-instance/etc-override/broker.xml");
         lifecycleManager.copyBytesToContainer(containerId, tls.pkcs12Bytes(),
                 "/var/lib/artemis-instance/etc-override/artemis.p12");
+        lifecycleManager.copyBytesToContainer(containerId, loadArtemisExtension(),
+                ARTEMIS_EXTENSION_PATH);
+        lifecycleManager.copyBytesToContainer(containerId, loadResource(PROTON_PATCH_RESOURCE),
+                PROTON_J_PATH);
+        lifecycleManager.copyBytesToContainer(containerId, loadResource(ARTEMIS_AMQP_PATCH_RESOURCE),
+                ARTEMIS_AMQP_PATH);
 
         ContainerLifecycleManager.ContainerInfo info = lifecycleManager.startCreated(containerId, spec);
 
@@ -187,7 +208,13 @@ public class ServiceBusNamespaceManager {
     // ── Jolokia entity management ─────────────────────────────────────────────
 
     /** Provisions an ANYCAST queue in the running Artemis broker. */
-    public void jolokiaCreateQueue(String namespaceName, String queueName) {
+    public void jolokiaCreateQueue(String namespaceName, String queueName,
+                                    boolean requiresSession, long lockDurationSeconds) {
+        String deadLetterQueue = queueName + DEAD_LETTER_QUEUE_SUFFIX;
+        int maxDeliveryAttempts = config.services().serviceBus().maxDeliveryCount();
+        String addressSettings = "{\"deadLetterAddress\":" + jsonString(deadLetterQueue)
+                + ",\"maxDeliveryAttempts\":" + maxDeliveryAttempts
+                + ",\"autoCreateQueues\":false,\"autoCreateAddresses\":false}";
         withJolokia(namespaceName, (http, baseUrl, auth, mbean) -> {
             jolokiaExec(http, baseUrl, auth, mbean,
                     "createAddress(java.lang.String,java.lang.String)",
@@ -195,81 +222,167 @@ public class ServiceBusNamespaceManager {
             jolokiaExec(http, baseUrl, auth, mbean,
                     "createQueue(java.lang.String,java.lang.String,java.lang.String,java.lang.String,boolean,int,boolean,boolean)",
                     jsonArr(queueName, "ANYCAST", queueName, "", true, -1, false, false));
+            jolokiaExec(http, baseUrl, auth, mbean,
+                    "createAddress(java.lang.String,java.lang.String)",
+                    jsonArr(deadLetterQueue, "ANYCAST"));
+            jolokiaExec(http, baseUrl, auth, mbean,
+                    "createQueue(java.lang.String,java.lang.String,java.lang.String,java.lang.String,boolean,int,boolean,boolean)",
+                    jsonArr(deadLetterQueue, "ANYCAST", deadLetterQueue, "", true, -1, false, false));
+            applySessionMetadata(http, baseUrl, auth, mbean, queueName,
+                    requiresSession, lockDurationSeconds);
+            applySessionMetadata(http, baseUrl, auth, mbean, deadLetterQueue,
+                    requiresSession, lockDurationSeconds);
+            jolokiaExec(http, baseUrl, auth, mbean,
+                    "addAddressSettings(java.lang.String,java.lang.String)",
+                    jsonArr(queueName, addressSettings));
         });
     }
 
     /** Removes an ANYCAST queue from the running Artemis broker. */
     public void jolokiaDeleteQueue(String namespaceName, String queueName) {
+        String deadLetterQueue = queueName + DEAD_LETTER_QUEUE_SUFFIX;
         withJolokia(namespaceName, (http, baseUrl, auth, mbean) -> {
             jolokiaExec(http, baseUrl, auth, mbean,
                     "destroyQueue(java.lang.String,boolean,boolean)",
                     jsonArr(queueName, true, true));
+            jolokiaExec(http, baseUrl, auth, mbean,
+                    "destroyQueue(java.lang.String,boolean,boolean)",
+                    jsonArr(deadLetterQueue, true, true));
+            jolokiaExec(http, baseUrl, auth, mbean,
+                    "deleteAddress(java.lang.String,boolean)",
+                    jsonArr(deadLetterQueue, true));
+            jolokiaExec(http, baseUrl, auth, mbean,
+                    "removeAddressSettings(java.lang.String)",
+                    jsonArr(queueName));
         });
     }
 
-    /** Provisions a MULTICAST address for a topic in the running Artemis broker. */
+    /**
+     * Provisions an ANYCAST ingress accepted by SDK sender links and diverts it exclusively to a
+     * hidden MULTICAST address. Subscription diverts fan messages out from that hidden address.
+     */
     public void jolokiaCreateTopic(String namespaceName, String topicName) {
+        String topicAddress = topicName + TOPIC_ADDRESS_SUFFIX;
         withJolokia(namespaceName, (http, baseUrl, auth, mbean) -> {
             jolokiaExec(http, baseUrl, auth, mbean,
                     "createAddress(java.lang.String,java.lang.String)",
-                    jsonArr(topicName, "MULTICAST"));
+                    jsonArr(topicName, "ANYCAST"));
+            jolokiaExec(http, baseUrl, auth, mbean,
+                    "createQueue(java.lang.String,java.lang.String,java.lang.String,java.lang.String,boolean,int,boolean,boolean)",
+                    jsonArr(topicName, "ANYCAST", topicName, "", true, -1, false, false));
+            jolokiaExec(http, baseUrl, auth, mbean,
+                    "createAddress(java.lang.String,java.lang.String)",
+                    jsonArr(topicAddress, "MULTICAST"));
+            jolokiaCreateDivert(http, baseUrl, auth, mbean,
+                    topicName + TOPIC_DIVERT_SUFFIX, topicName, topicAddress, "", true);
         });
     }
 
     /** Removes a MULTICAST address and all its subscription queues from the running Artemis broker. */
     public void jolokiaDeleteTopic(String namespaceName, String topicName) {
+        String topicAddress = topicName + TOPIC_ADDRESS_SUFFIX;
         withJolokia(namespaceName, (http, baseUrl, auth, mbean) -> {
+            jolokiaExec(http, baseUrl, auth, mbean,
+                    "destroyDivert(java.lang.String)",
+                    jsonArr(topicName + TOPIC_DIVERT_SUFFIX));
+            jolokiaExec(http, baseUrl, auth, mbean,
+                    "destroyQueue(java.lang.String,boolean,boolean)",
+                    jsonArr(topicName, true, true));
             jolokiaExec(http, baseUrl, auth, mbean,
                     "deleteAddress(java.lang.String,boolean)",
                     jsonArr(topicName, true));
+            jolokiaExec(http, baseUrl, auth, mbean,
+                    "deleteAddress(java.lang.String,boolean)",
+                    jsonArr(topicAddress, true));
         });
     }
 
     /**
-     * Provisions a durable MULTICAST queue (subscription) bound to the topic address.
-     * The queue name follows the Azure convention: {@code {topicName}/Subscriptions/{subName}}.
+     * Provisions a durable subscription queue with its own address and dead-letter queue.
+     * A divert copies matching messages from the MULTICAST topic address to the subscription's
+     * ANYCAST address. The queue name follows the Azure convention:
+     * {@code {topicName}/Subscriptions/{subName}}.
      *
      * @param filter Artemis core filter (SQL92 selector) applied to the queue — the compiled
      *               form of the subscription's rules; empty string matches everything
      */
     public void jolokiaCreateSubscription(String namespaceName, String topicName, String subName,
-                                           String filter) {
+                                           String filter, boolean requiresSession,
+                                           long lockDurationSeconds) {
         String queueName = topicName + "/Subscriptions/" + subName;
+        String deadLetterQueue = queueName + DEAD_LETTER_QUEUE_SUFFIX;
+        String divertName = queueName + SUBSCRIPTION_DIVERT_SUFFIX;
+        int maxDeliveryAttempts = config.services().serviceBus().maxDeliveryCount();
+        String addressSettings = "{\"deadLetterAddress\":" + jsonString(deadLetterQueue)
+                + ",\"maxDeliveryAttempts\":" + maxDeliveryAttempts
+                + ",\"autoCreateQueues\":false,\"autoCreateAddresses\":false}";
         withJolokia(namespaceName, (http, baseUrl, auth, mbean) -> {
-            // address=topicName (MULTICAST), queue name=topicName/Subscriptions/subName
+            jolokiaExec(http, baseUrl, auth, mbean,
+                    "createAddress(java.lang.String,java.lang.String)",
+                    jsonArr(queueName, "ANYCAST"));
             jolokiaExec(http, baseUrl, auth, mbean,
                     "createQueue(java.lang.String,java.lang.String,java.lang.String,java.lang.String,boolean,int,boolean,boolean)",
-                    jsonArr(topicName, "MULTICAST", queueName, filter, true, -1, false, false));
+                    jsonArr(queueName, "ANYCAST", queueName, "", true, -1, false, false));
+            jolokiaExec(http, baseUrl, auth, mbean,
+                    "createAddress(java.lang.String,java.lang.String)",
+                    jsonArr(deadLetterQueue, "ANYCAST"));
+            jolokiaExec(http, baseUrl, auth, mbean,
+                    "createQueue(java.lang.String,java.lang.String,java.lang.String,java.lang.String,boolean,int,boolean,boolean)",
+                    jsonArr(deadLetterQueue, "ANYCAST", deadLetterQueue, "", true, -1, false, false));
+            applySessionMetadata(http, baseUrl, auth, mbean, queueName,
+                    requiresSession, lockDurationSeconds);
+            applySessionMetadata(http, baseUrl, auth, mbean, deadLetterQueue,
+                    requiresSession, lockDurationSeconds);
+            jolokiaExec(http, baseUrl, auth, mbean,
+                    "addAddressSettings(java.lang.String,java.lang.String)",
+                    jsonArr(queueName, addressSettings));
+            jolokiaCreateDivert(http, baseUrl, auth, mbean, divertName,
+                    topicName + TOPIC_ADDRESS_SUFFIX, queueName, filter, false);
         });
     }
 
     /**
-     * Replaces the filter of an existing subscription queue in place via
-     * {@code ActiveMQServerControl.updateQueue(String queueConfiguration)}. The broker applies
-     * the new filter to future routing only ({@code Queue.setFilter}), matching Azure's
-     * rule-change semantics: messages already routed to the subscription stay, attached
-     * receivers stay connected.
+     * Replaces the filter of an existing subscription divert. The broker applies the new filter
+     * to future routing only, matching Azure's rule-change semantics: messages already routed to
+     * the subscription stay, and attached receivers stay connected to the unchanged queue.
      */
     public void jolokiaUpdateSubscriptionFilter(String namespaceName, String topicName, String subName,
                                                  String filter) {
         String queueName = topicName + "/Subscriptions/" + subName;
-        // QueueConfiguration JSON uses kebab-case keys ("filter-string", not "filterString")
-        String queueConfigJson = "{\"name\":" + jsonString(queueName)
-                + ",\"filter-string\":" + jsonString(filter) + "}";
+        String divertName = queueName + SUBSCRIPTION_DIVERT_SUFFIX;
         withJolokia(namespaceName, (http, baseUrl, auth, mbean) -> {
             jolokiaExec(http, baseUrl, auth, mbean,
-                    "updateQueue(java.lang.String)",
-                    jsonArr(queueConfigJson));
+                    "destroyDivert(java.lang.String)",
+                    jsonArr(divertName));
+            jolokiaCreateDivert(http, baseUrl, auth, mbean, divertName,
+                    topicName + TOPIC_ADDRESS_SUFFIX, queueName, filter, false);
         });
     }
 
-    /** Removes a subscription queue from the running Artemis broker. */
+    /** Removes a subscription queue, divert, dead-letter queue, and address settings. */
     public void jolokiaDeleteSubscription(String namespaceName, String topicName, String subName) {
         String queueName = topicName + "/Subscriptions/" + subName;
+        String deadLetterQueue = queueName + DEAD_LETTER_QUEUE_SUFFIX;
+        String divertName = queueName + SUBSCRIPTION_DIVERT_SUFFIX;
         withJolokia(namespaceName, (http, baseUrl, auth, mbean) -> {
+            jolokiaExec(http, baseUrl, auth, mbean,
+                    "destroyDivert(java.lang.String)",
+                    jsonArr(divertName));
             jolokiaExec(http, baseUrl, auth, mbean,
                     "destroyQueue(java.lang.String,boolean,boolean)",
                     jsonArr(queueName, true, true));
+            jolokiaExec(http, baseUrl, auth, mbean,
+                    "deleteAddress(java.lang.String,boolean)",
+                    jsonArr(queueName, true));
+            jolokiaExec(http, baseUrl, auth, mbean,
+                    "destroyQueue(java.lang.String,boolean,boolean)",
+                    jsonArr(deadLetterQueue, true, true));
+            jolokiaExec(http, baseUrl, auth, mbean,
+                    "deleteAddress(java.lang.String,boolean)",
+                    jsonArr(deadLetterQueue, true));
+            jolokiaExec(http, baseUrl, auth, mbean,
+                    "removeAddressSettings(java.lang.String)",
+                    jsonArr(queueName));
         });
     }
 
@@ -277,6 +390,22 @@ public class ServiceBusNamespaceManager {
 
     String containerName(String namespaceName) {
         return ContainerStorageHelper.dockerName(config, "servicebus-" + namespaceName);
+    }
+
+    private static byte[] loadArtemisExtension() {
+        return loadResource(ARTEMIS_EXTENSION_RESOURCE);
+    }
+
+    private static byte[] loadResource(String resource) {
+        try (InputStream stream = ServiceBusNamespaceManager.class.getResourceAsStream(
+                resource)) {
+            if (stream == null) {
+                throw new IllegalStateException("Embedded Artemis resource not found: " + resource);
+            }
+            return stream.readAllBytes();
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to read embedded Artemis resource: " + resource, e);
+        }
     }
 
     private static String rootMessage(Throwable error) {
@@ -291,6 +420,31 @@ public class ServiceBusNamespaceManager {
     @FunctionalInterface
     interface JolokiaAction {
         void run(HttpClient http, String baseUrl, String auth, String mbean) throws Exception;
+    }
+
+    private void jolokiaCreateDivert(HttpClient http, String baseUrl, String auth,
+                                      String mbean, String divertName, String sourceAddress,
+                                      String forwardingAddress, String filter, boolean exclusive) {
+        jolokiaExec(http, baseUrl, auth, mbean,
+                "createDivert(java.lang.String,java.lang.String,java.lang.String,java.lang.String,boolean,java.lang.String,java.lang.String)",
+                jsonArr(divertName, divertName, sourceAddress, forwardingAddress,
+                        exclusive, filter, null));
+    }
+
+    private void applySessionMetadata(HttpClient http, String baseUrl, String auth,
+                                      String mbean, String queueName,
+                                      boolean requiresSession, long lockDurationSeconds) {
+        if (!requiresSession) {
+            return;
+        }
+
+        // Artemis security is disabled in this sidecar, so QueueConfiguration.user can carry
+        // internal metadata that the patched AMQP protocol handler reads during link attach.
+        String metadata = SESSION_METADATA_PREFIX + lockDurationSeconds;
+        String queueConfiguration = "{\"name\":" + jsonString(queueName)
+                + ",\"user\":" + jsonString(metadata) + "}";
+        jolokiaExec(http, baseUrl, auth, mbean,
+                "updateQueue(java.lang.String)", jsonArr(queueConfiguration));
     }
 
     private void withJolokia(String namespaceName, JolokiaAction action) {
