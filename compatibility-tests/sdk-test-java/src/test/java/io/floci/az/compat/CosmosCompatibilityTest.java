@@ -171,6 +171,33 @@ class CosmosCompatibilityTest {
     }
 
     @Test
+    @DisplayName("document replace: stale If-Match returns 412 and preserves item")
+    @SuppressWarnings("unchecked")
+    void documentReplaceHonorsIfMatch() {
+        String id = dbId();
+        client.createDatabase(id);
+        CosmosDatabase db = client.getDatabase(id);
+        db.createContainerIfNotExists("items", "/category");
+        CosmosContainer container = db.getContainer("items");
+        container.createItem(doc("conditional-1", "tools", "stock", 10));
+
+        CosmosException exception = assertThrows(CosmosException.class,
+            () -> container.replaceItem(
+                doc("conditional-1", "tools", "stock", 5),
+                "conditional-1",
+                new PartitionKey("tools"),
+                new CosmosItemRequestOptions().setIfMatchETag("\"stale\"")));
+
+        assertEquals(412, exception.getStatusCode());
+        Map<String, Object> unchanged = container
+            .readItem("conditional-1", new PartitionKey("tools"), Map.class)
+            .getItem();
+        assertEquals(10, ((Number) unchanged.get("stock")).intValue());
+
+        db.delete();
+    }
+
+    @Test
     @DisplayName("database delete cascades to containers and documents")
     void cascadeDelete() {
         String id = dbId();
@@ -220,7 +247,7 @@ class CosmosCompatibilityTest {
     }
 
     @Test
-    @DisplayName("transactional batch: Create/Read/Replace/Delete/Upsert")
+    @DisplayName("transactional batch: CRUD, Patch, and rollback")
     @SuppressWarnings("unchecked")
     void transactionalBatch() {
         String id = dbId();
@@ -262,6 +289,32 @@ class CosmosCompatibilityTest {
                 .getItem().get("v")).intValue());
         assertThrows(CosmosException.class,
                 () -> container.readItem("b3", new PartitionKey("test"), Map.class));
+
+        // Batch 3: Patch is visible to a later operation in the same batch.
+        CosmosBatch batch3 = CosmosBatch.createCosmosBatch(new PartitionKey("test"));
+        batch3.patchItemOperation("b1", CosmosPatchOperations.create()
+                .set("/v", 7)
+                .increment("/counter", 2));
+        batch3.readItemOperation("b1");
+
+        CosmosBatchResponse r3 = container.executeCosmosBatch(batch3);
+        assertEquals(200, r3.getResults().get(0).getStatusCode());
+        assertEquals(200, r3.getResults().get(1).getStatusCode());
+        assertEquals(7, ((Number) container
+                .readItem("b1", new PartitionKey("test"), Map.class)
+                .getItem().get("v")).intValue());
+
+        // Batch 4: a failure rolls back an earlier successful mutation.
+        CosmosBatch batch4 = CosmosBatch.createCosmosBatch(new PartitionKey("test"));
+        batch4.replaceItemOperation("b1", doc("b1", "test", "v", 999));
+        batch4.deleteItemOperation("missing");
+
+        CosmosBatchResponse r4 = container.executeCosmosBatch(batch4);
+        assertEquals(424, r4.getResults().get(0).getStatusCode());
+        assertEquals(404, r4.getResults().get(1).getStatusCode());
+        assertEquals(7, ((Number) container
+                .readItem("b1", new PartitionKey("test"), Map.class)
+                .getItem().get("v")).intValue());
 
         db.delete();
     }
