@@ -11,6 +11,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.util.Map;
 import java.util.Optional;
@@ -19,10 +20,9 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Manages the Docker lifecycle of Azure SQL Server containers.
  *
- * <p>Each logical server maps to one {@code azure-sql-edge} (or configurable)
- * Docker container.  Containers are started on-demand when the first request
- * arrives for a given server name, following the same pattern used by the
- * Cosmos DB engine providers.
+ * <p>Each logical server maps to one SQL Server container. Containers start on demand when the
+ * first request arrives for a given server name, following the same pattern used by the Cosmos DB
+ * engine providers.
  *
  * <p>This class is intentionally free of JDBC / DDL logic.  Database creation
  * and schema migrations are the responsibility of the application (Flyway,
@@ -36,13 +36,24 @@ public class SqlServerManager {
 
     private static final int SQL_CONTAINER_PORT = 1433;
 
-    @Inject EmulatorConfig config;
-    @Inject ContainerLifecycleManager containerManager;
-    @Inject ContainerBuilder containerBuilder;
-    @Inject ContainerDetector containerDetector;
+    private final EmulatorConfig config;
+    private final ContainerLifecycleManager containerManager;
+    private final ContainerBuilder containerBuilder;
+    private final ContainerDetector containerDetector;
 
     /** containerId → container name, for cleanup on shutdown. */
     private final ConcurrentHashMap<String, String> managedContainers = new ConcurrentHashMap<>();
+
+    @Inject
+    public SqlServerManager(EmulatorConfig config,
+                            ContainerLifecycleManager containerManager,
+                            ContainerBuilder containerBuilder,
+                            ContainerDetector containerDetector) {
+        this.config = config;
+        this.containerManager = containerManager;
+        this.containerBuilder = containerBuilder;
+        this.containerDetector = containerDetector;
+    }
 
     // ── Public API ────────────────────────────────────────────────────────────
 
@@ -71,7 +82,6 @@ public class SqlServerManager {
             .withDockerNetwork(config.services().dockerNetwork())  // join the shared network when running in Docker
             .withEnv("ACCEPT_EULA", "Y")
             .withEnv("MSSQL_SA_PASSWORD", password)
-            .withEnv("SA_PASSWORD", password)       // azure-sql-edge uses SA_PASSWORD
             .withLogRotation()
             .build();
 
@@ -100,7 +110,19 @@ public class SqlServerManager {
         LOG.infof("SQL Server container started: server=%s containerId=%s endpoint=%s:%d",
             entry.serverName(), containerId, reachableHost, reachablePort);
 
-        waitForReady(reachableHost, reachablePort, sqlConfig.startupTimeoutSeconds());
+        try {
+            waitForReady(reachableHost, reachablePort, sqlConfig.startupTimeoutSeconds());
+        } catch (RuntimeException startupFailure) {
+            managedContainers.remove(containerId);
+            try {
+                containerManager.stopAndRemove(containerId, null);
+            } catch (RuntimeException cleanupFailure) {
+                startupFailure.addSuppressed(cleanupFailure);
+                LOG.warnf(cleanupFailure,
+                    "Failed to remove unready SQL Server container '%s'", containerName);
+            }
+            throw startupFailure;
+        }
         LOG.infof("SQL Server ready: server=%s endpoint=%s:%d", entry.serverName(), reachableHost, reachablePort);
 
         return entry.withContainer(containerId, reachablePort, reachableHost);
@@ -138,18 +160,32 @@ public class SqlServerManager {
      * clients.  A brief post-TCP sleep covers the remaining boot window without
      * requiring a JDBC driver on the main runtime classpath.
      */
-    private void waitForReady(String host, int port, int timeoutSeconds) {
+    static void waitForReady(String host, int port, int timeoutSeconds) {
         LOG.infof("Waiting for SQL Server to be ready on %s:%d (timeout=%ds)…", host, port, timeoutSeconds);
         long deadline = System.currentTimeMillis() + (long) timeoutSeconds * 1000;
+        boolean tcpOpen = false;
 
         // Phase 1 — wait for the port to accept TCP connections
         while (System.currentTimeMillis() < deadline) {
-            try (Socket s = new Socket(host, port)) {
+            try (Socket socket = new Socket()) {
+                long remainingMillis = deadline - System.currentTimeMillis();
+                socket.connect(new InetSocketAddress(host, port),
+                    Math.toIntExact(Math.min(1_000L, Math.max(1L, remainingMillis))));
                 LOG.infof("SQL Server TCP %s:%d is open — waiting for engine init…", host, port);
+                tcpOpen = true;
                 break;
             } catch (Exception e) {
-                sleep(1000);
+                long retryDelayMillis = Math.min(1_000L,
+                    Math.max(0L, deadline - System.currentTimeMillis()));
+                if (retryDelayMillis > 0) {
+                    sleep(retryDelayMillis);
+                }
             }
+        }
+        if (!tcpOpen) {
+            throw new IllegalStateException(
+                "SQL Server did not open TCP " + host + ":" + port
+                    + " within " + timeoutSeconds + " seconds");
         }
 
         // Phase 2 — give the engine a moment to finish startup after the port opens.
