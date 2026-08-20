@@ -24,6 +24,8 @@ public final class ServiceBusModels {
             boolean requiresSession,
             boolean requiresDuplicateDetection,
             long duplicateDetectionHistorySeconds,
+            long defaultMessageTtlMillis,
+            boolean deadLetteringOnMessageExpiration,
             Instant createdAt,
             Instant updatedAt) {
 
@@ -32,15 +34,20 @@ public final class ServiceBusModels {
                 duplicateDetectionHistorySeconds =
                         ServiceBusEntityXml.DEFAULT_DUPLICATE_DETECTION_HISTORY_SECONDS;
             }
+            if (defaultMessageTtlMillis == 0) {
+                defaultMessageTtlMillis = ServiceBusEntityXml.DEFAULT_MESSAGE_TTL_MILLIS;
+            }
         }
 
         static QueueEntity defaults(String name, int maxDeliveryCount,
                                      long lockDurationSeconds, boolean requiresSession,
-                                     ServiceBusEntityXml.DuplicateDetectionSettings duplicateDetection) {
+                                     ServiceBusEntityXml.DuplicateDetectionSettings duplicateDetection,
+                                     ServiceBusEntityXml.MessageLifetimeSettings lifetime) {
             Instant now = Instant.now();
             return new QueueEntity(name, maxDeliveryCount, lockDurationSeconds,
                     1024, requiresSession, duplicateDetection.enabled(),
-                    duplicateDetection.historySeconds(), now, now);
+                    duplicateDetection.historySeconds(), lifetime.ttlMillis(),
+                    lifetime.deadLetterOnExpiration(), now, now);
         }
     }
 
@@ -50,6 +57,7 @@ public final class ServiceBusModels {
             long maxSizeInMegabytes,
             boolean requiresDuplicateDetection,
             long duplicateDetectionHistorySeconds,
+            long defaultMessageTtlMillis,
             Instant createdAt,
             Instant updatedAt) {
 
@@ -58,13 +66,18 @@ public final class ServiceBusModels {
                 duplicateDetectionHistorySeconds =
                         ServiceBusEntityXml.DEFAULT_DUPLICATE_DETECTION_HISTORY_SECONDS;
             }
+            if (defaultMessageTtlMillis == 0) {
+                defaultMessageTtlMillis = ServiceBusEntityXml.DEFAULT_MESSAGE_TTL_MILLIS;
+            }
         }
 
-        static TopicEntity defaults(String name,
-                                    ServiceBusEntityXml.DuplicateDetectionSettings duplicateDetection) {
+        static TopicEntity defaults(
+                String name,
+                ServiceBusEntityXml.DuplicateDetectionSettings duplicateDetection,
+                ServiceBusEntityXml.MessageLifetimeSettings lifetime) {
             Instant now = Instant.now();
             return new TopicEntity(name, 1024, duplicateDetection.enabled(),
-                    duplicateDetection.historySeconds(), now, now);
+                    duplicateDetection.historySeconds(), lifetime.ttlMillis(), now, now);
         }
     }
 
@@ -117,15 +130,25 @@ public final class ServiceBusModels {
             int maxDeliveryCount,
             long lockDurationSeconds,
             boolean requiresSession,
+            long defaultMessageTtlMillis,
+            boolean deadLetteringOnMessageExpiration,
             Instant createdAt,
             Instant updatedAt) {
 
+        public SubscriptionEntity {
+            if (defaultMessageTtlMillis == 0) {
+                defaultMessageTtlMillis = ServiceBusEntityXml.DEFAULT_MESSAGE_TTL_MILLIS;
+            }
+        }
+
         static SubscriptionEntity defaults(String topicName, String name,
                                             int maxDeliveryCount, long lockDurationSeconds,
-                                            boolean requiresSession) {
+                                            boolean requiresSession,
+                                            ServiceBusEntityXml.MessageLifetimeSettings lifetime) {
             Instant now = Instant.now();
             return new SubscriptionEntity(topicName, name, maxDeliveryCount, lockDurationSeconds,
-                    requiresSession, now, now);
+                    requiresSession, lifetime.ttlMillis(),
+                    lifetime.deadLetterOnExpiration(), now, now);
         }
     }
 }

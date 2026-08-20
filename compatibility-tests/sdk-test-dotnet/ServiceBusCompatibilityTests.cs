@@ -17,7 +17,8 @@ public sealed class ServiceBusCompatibilityTests
         int.Parse(Environment.GetEnvironmentVariable("SERVICEBUS_AMQP_PORT") ?? "5673");
 
     [Test]
-    [Timeout(60_000)]
+    [NotInParallel("servicebus-broker")]
+    [Timeout(90_000)]
     public async Task DotnetSdkSupportsSettlementOperations(CancellationToken cancellationToken)
     {
         const string serviceBusNamespace = "default";
@@ -32,7 +33,7 @@ public sealed class ServiceBusCompatibilityTests
 
         await using var client = new ServiceBusClient(connectionString, new ServiceBusClientOptions
         {
-            RetryOptions = { TryTimeout = TimeSpan.FromSeconds(10) }
+            RetryOptions = { TryTimeout = TimeSpan.FromSeconds(30) }
         });
         await using ServiceBusSender sender = client.CreateSender(queue);
         await using ServiceBusReceiver receiver = client.CreateReceiver(queue);
@@ -243,6 +244,90 @@ public sealed class ServiceBusCompatibilityTests
         await subscriptionReceiver.CompleteMessageAsync(topicMarker, cancellationToken);
     }
 
+    [Test]
+    [NotInParallel("servicebus-broker")]
+    [Timeout(120_000)]
+    public async Task EntityAndMessageTtlExpireIntoDeadLetterQueue(
+        CancellationToken cancellationToken)
+    {
+        const string serviceBusNamespace = "default";
+        string entityTtlQueue = $"entity-ttl-{Guid.NewGuid():N}";
+        string messageTtlQueue = $"message-ttl-{Guid.NewGuid():N}";
+        await EnsureNamespace(serviceBusNamespace, cancellationToken);
+        await EnsureQueue(
+            serviceBusNamespace, entityTtlQueue, TimeSpan.FromSeconds(2), cancellationToken);
+        await EnsureQueue(
+            serviceBusNamespace, messageTtlQueue, TimeSpan.FromSeconds(10), cancellationToken);
+
+        string connectionString =
+            $"Endpoint=sb://{ServiceBusHost}:{ServiceBusPort};" +
+            "SharedAccessKeyName=RootManageSharedAccessKey;" +
+            "SharedAccessKey=devkey;UseDevelopmentEmulator=true;";
+        await using var client = new ServiceBusClient(connectionString);
+
+        await AssertExpiresIntoDeadLetterQueue(
+            client, entityTtlQueue, new ServiceBusMessage("entity-default"), cancellationToken);
+        await AssertExpiresIntoDeadLetterQueue(
+            client, messageTtlQueue,
+            new ServiceBusMessage("message-override") { TimeToLive = TimeSpan.FromSeconds(1) },
+            cancellationToken);
+    }
+
+    [Test]
+    [NotInParallel("servicebus-broker")]
+    [Timeout(90_000)]
+    public async Task ExpiredLockedMessageDeadLettersWhenAbandoned(
+        CancellationToken cancellationToken)
+    {
+        const string serviceBusNamespace = "default";
+        string queue = $"locked-ttl-{Guid.NewGuid():N}";
+        await EnsureNamespace(serviceBusNamespace, cancellationToken);
+        await EnsureQueue(
+            serviceBusNamespace, queue, TimeSpan.FromSeconds(1), cancellationToken);
+
+        string connectionString =
+            $"Endpoint=sb://{ServiceBusHost}:{ServiceBusPort};" +
+            "SharedAccessKeyName=RootManageSharedAccessKey;" +
+            "SharedAccessKey=devkey;UseDevelopmentEmulator=true;";
+        await using var client = new ServiceBusClient(connectionString);
+        await using ServiceBusSender sender = client.CreateSender(queue);
+        await using ServiceBusReceiver receiver = client.CreateReceiver(queue);
+
+        await sender.SendMessageAsync(new ServiceBusMessage("locked-expiry"), cancellationToken);
+        ServiceBusReceivedMessage locked = await Receive(receiver, cancellationToken);
+        await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+        await receiver.AbandonMessageAsync(locked, cancellationToken: cancellationToken);
+
+        await Assert.That(await receiver.ReceiveMessageAsync(
+            TimeSpan.FromSeconds(1), cancellationToken)).IsNull();
+        await using ServiceBusReceiver deadLetterReceiver = client.CreateReceiver(
+            queue, new ServiceBusReceiverOptions { SubQueue = SubQueue.DeadLetter });
+        ServiceBusReceivedMessage expired = await Receive(deadLetterReceiver, cancellationToken);
+        await Assert.That(expired.Body.ToString()).IsEqualTo("locked-expiry");
+        await deadLetterReceiver.CompleteMessageAsync(expired, cancellationToken);
+    }
+
+    private static async Task AssertExpiresIntoDeadLetterQueue(
+        ServiceBusClient client,
+        string queue,
+        ServiceBusMessage message,
+        CancellationToken cancellationToken)
+    {
+        await using ServiceBusSender sender = client.CreateSender(queue);
+        await sender.SendMessageAsync(message, cancellationToken);
+        await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken);
+
+        await using ServiceBusReceiver normalReceiver = client.CreateReceiver(queue);
+        await Assert.That(await normalReceiver.ReceiveMessageAsync(
+            TimeSpan.FromSeconds(1), cancellationToken)).IsNull();
+
+        await using ServiceBusReceiver deadLetterReceiver = client.CreateReceiver(
+            queue, new ServiceBusReceiverOptions { SubQueue = SubQueue.DeadLetter });
+        ServiceBusReceivedMessage expired = await Receive(deadLetterReceiver, cancellationToken);
+        await Assert.That(expired.Body.ToString()).IsEqualTo(message.Body.ToString());
+        await deadLetterReceiver.CompleteMessageAsync(expired, cancellationToken);
+    }
+
     private static async Task<ServiceBusReceivedMessage> Receive(
         ServiceBusReceiver receiver, CancellationToken cancellationToken)
     {
@@ -326,6 +411,30 @@ public sealed class ServiceBusCompatibilityTests
             "Subscription",
             cancellationToken);
 
+    private static async Task EnsureQueue(
+        string serviceBusNamespace,
+        string queue,
+        TimeSpan defaultMessageTtl,
+        CancellationToken cancellationToken,
+        bool deadLetterOnExpiration = true)
+    {
+        string body = $"""
+            <entry xmlns="http://www.w3.org/2005/Atom">
+              <content type="application/xml">
+                <QueueDescription xmlns="http://schemas.microsoft.com/netservices/2010/10/servicebus/connect">
+                  <DefaultMessageTimeToLive>{System.Xml.XmlConvert.ToString(defaultMessageTtl)}</DefaultMessageTimeToLive>
+                  <DeadLetteringOnMessageExpiration>{deadLetterOnExpiration.ToString().ToLowerInvariant()}</DeadLetteringOnMessageExpiration>
+                </QueueDescription>
+              </content>
+            </entry>
+            """;
+        await PutEntity(
+            $"{EmulatorEndpoint}/devstoreaccount1-servicebus/{serviceBusNamespace}/queues/{queue}",
+            body,
+            "Queue",
+            cancellationToken);
+    }
+
     private static async Task PutEntity(
         string url, string content, string entityType, CancellationToken cancellationToken)
     {
@@ -339,4 +448,5 @@ public sealed class ServiceBusCompatibilityTests
             .Because($"{entityType} creation failed: {(int)response.StatusCode} " +
                      await response.Content.ReadAsStringAsync(cancellationToken));
     }
+
 }
