@@ -46,6 +46,29 @@ public class ServiceBusNamespaceManager {
     private static final String PROTON_J_PATH = "/opt/activemq-artemis/lib/proton-j-0.34.1.jar";
     private static final String ARTEMIS_AMQP_PATH =
             "/opt/activemq-artemis/lib/artemis-amqp-protocol-2.44.0.jar";
+    private static final String MANAGEMENT_XML = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <management-context xmlns="http://activemq.apache.org/schema">
+              <authorisation>
+                <allowlist>
+                  <entry domain="hawtio"/>
+                </allowlist>
+                <default-access>
+                  <access method="list*" roles="amq"/>
+                  <access method="get*" roles="amq"/>
+                  <access method="is*" roles="amq"/>
+                </default-access>
+                <role-access>
+                  <match domain="org.apache.activemq.artemis">
+                    <access method="*" roles="amq"/>
+                  </match>
+                  <match domain="io.floci.az.artemis">
+                    <access method="*" roles="amq"/>
+                  </match>
+                </role-access>
+              </authorisation>
+            </management-context>
+            """;
     private static final int AMQP_PORT = 5672;
     private static final int AMQPS_PORT = 5671;
     private static final int JOLOKIA_PORT = 8161;
@@ -54,6 +77,8 @@ public class ServiceBusNamespaceManager {
     private static final String TOPIC_ADDRESS_SUFFIX = "/$Topic";
     private static final String TOPIC_DIVERT_SUFFIX = "/$TopicDivert";
     private static final String SESSION_METADATA_PREFIX = "floci-az:servicebus-session:";
+    private static final String DUPLICATE_DETECTION_MBEAN =
+            "io.floci.az.artemis:type=ServiceBusDuplicateDetection";
 
     /**
      * Immutable snapshot of a running namespace.
@@ -93,7 +118,12 @@ public class ServiceBusNamespaceManager {
         this.tlsGenerator = tlsGenerator;
     }
 
-    public NamespaceState startNamespace(String namespaceName, int amqpHostPort, int amqpsHostPort) {
+    public synchronized NamespaceState startNamespace(
+            String namespaceName, int amqpHostPort, int amqpsHostPort) {
+        NamespaceState existing = namespaces.get(namespaceName);
+        if (existing != null) {
+            return existing;
+        }
         String containerName = containerName(namespaceName);
 
         LOG.infov("Starting Artemis broker for Service Bus namespace ''{0}'' (plain:{1}, TLS:{2})",
@@ -126,6 +156,8 @@ public class ServiceBusNamespaceManager {
         String containerId = lifecycleManager.create(spec);
         lifecycleManager.copyFileToContainer(containerId, brokerXml,
                 "/var/lib/artemis-instance/etc-override/broker.xml");
+        lifecycleManager.copyFileToContainer(containerId, MANAGEMENT_XML,
+                "/var/lib/artemis-instance/etc-override/management.xml");
         lifecycleManager.copyBytesToContainer(containerId, tls.pkcs12Bytes(),
                 "/var/lib/artemis-instance/etc-override/artemis.p12");
         lifecycleManager.copyBytesToContainer(containerId, loadArtemisExtension(),
@@ -208,8 +240,12 @@ public class ServiceBusNamespaceManager {
     // ── Jolokia entity management ─────────────────────────────────────────────
 
     /** Provisions an ANYCAST queue in the running Artemis broker. */
-    public void jolokiaCreateQueue(String namespaceName, String queueName,
-                                    boolean requiresSession, long lockDurationSeconds) {
+    public void jolokiaCreateQueue(
+            String namespaceName,
+            String queueName,
+            boolean requiresSession,
+            long lockDurationSeconds,
+            ServiceBusEntityXml.DuplicateDetectionSettings duplicateDetection) {
         String deadLetterQueue = queueName + DEAD_LETTER_QUEUE_SUFFIX;
         int maxDeliveryAttempts = config.services().serviceBus().maxDeliveryCount();
         String addressSettings = "{\"deadLetterAddress\":" + jsonString(deadLetterQueue)
@@ -235,6 +271,8 @@ public class ServiceBusNamespaceManager {
             jolokiaExec(http, baseUrl, auth, mbean,
                     "addAddressSettings(java.lang.String,java.lang.String)",
                     jsonArr(queueName, addressSettings));
+            configureDuplicateDetection(
+                    http, baseUrl, auth, queueName, duplicateDetection);
         });
     }
 
@@ -254,6 +292,7 @@ public class ServiceBusNamespaceManager {
             jolokiaExec(http, baseUrl, auth, mbean,
                     "removeAddressSettings(java.lang.String)",
                     jsonArr(queueName));
+            removeDuplicateDetection(http, baseUrl, auth, queueName);
         });
     }
 
@@ -261,7 +300,10 @@ public class ServiceBusNamespaceManager {
      * Provisions an ANYCAST ingress accepted by SDK sender links and diverts it exclusively to a
      * hidden MULTICAST address. Subscription diverts fan messages out from that hidden address.
      */
-    public void jolokiaCreateTopic(String namespaceName, String topicName) {
+    public void jolokiaCreateTopic(
+            String namespaceName,
+            String topicName,
+            ServiceBusEntityXml.DuplicateDetectionSettings duplicateDetection) {
         String topicAddress = topicName + TOPIC_ADDRESS_SUFFIX;
         withJolokia(namespaceName, (http, baseUrl, auth, mbean) -> {
             jolokiaExec(http, baseUrl, auth, mbean,
@@ -275,13 +317,16 @@ public class ServiceBusNamespaceManager {
                     jsonArr(topicAddress, "MULTICAST"));
             jolokiaCreateDivert(http, baseUrl, auth, mbean,
                     topicName + TOPIC_DIVERT_SUFFIX, topicName, topicAddress, "", true);
+            configureDuplicateDetection(
+                    http, baseUrl, auth, topicName, duplicateDetection);
         });
     }
 
-    /** Removes a MULTICAST address and all its subscription queues from the running Artemis broker. */
+    /** Removes a topic ingress address and its hidden fan-out address from Artemis. */
     public void jolokiaDeleteTopic(String namespaceName, String topicName) {
         String topicAddress = topicName + TOPIC_ADDRESS_SUFFIX;
         withJolokia(namespaceName, (http, baseUrl, auth, mbean) -> {
+            removeDuplicateDetection(http, baseUrl, auth, topicName);
             jolokiaExec(http, baseUrl, auth, mbean,
                     "destroyDivert(java.lang.String)",
                     jsonArr(topicName + TOPIC_DIVERT_SUFFIX));
@@ -297,6 +342,26 @@ public class ServiceBusNamespaceManager {
         });
     }
 
+    private void configureDuplicateDetection(
+            HttpClient http,
+            String baseUrl,
+            String auth,
+            String address,
+            ServiceBusEntityXml.DuplicateDetectionSettings settings) {
+        if (!settings.enabled()) {
+            return;
+        }
+        jolokiaExec(http, baseUrl, auth, DUPLICATE_DETECTION_MBEAN,
+                "configure(java.lang.String,long)",
+                jsonArr(address, Math.multiplyExact(settings.historySeconds(), 1_000L)));
+    }
+
+    private void removeDuplicateDetection(
+            HttpClient http, String baseUrl, String auth, String address) {
+        jolokiaExec(http, baseUrl, auth, DUPLICATE_DETECTION_MBEAN,
+                "remove(java.lang.String)", jsonArr(address));
+    }
+
     /**
      * Provisions a durable subscription queue with its own address and dead-letter queue.
      * A divert copies matching messages from the MULTICAST topic address to the subscription's
@@ -306,9 +371,14 @@ public class ServiceBusNamespaceManager {
      * @param filter Artemis core filter (SQL92 selector) applied to the queue — the compiled
      *               form of the subscription's rules; empty string matches everything
      */
-    public void jolokiaCreateSubscription(String namespaceName, String topicName, String subName,
-                                           String filter, boolean requiresSession,
-                                           long lockDurationSeconds) {
+    public void jolokiaCreateSubscription(
+            String namespaceName,
+            String topicName,
+            String subName,
+            String filter,
+            boolean requiresSession,
+            long lockDurationSeconds,
+            ServiceBusEntityXml.DuplicateDetectionSettings duplicateDetection) {
         String queueName = topicName + "/Subscriptions/" + subName;
         String deadLetterQueue = queueName + DEAD_LETTER_QUEUE_SUFFIX;
         String divertName = queueName + SUBSCRIPTION_DIVERT_SUFFIX;
@@ -338,6 +408,8 @@ public class ServiceBusNamespaceManager {
                     jsonArr(queueName, addressSettings));
             jolokiaCreateDivert(http, baseUrl, auth, mbean, divertName,
                     topicName + TOPIC_ADDRESS_SUFFIX, queueName, filter, false);
+            configureDuplicateDetection(
+                    http, baseUrl, auth, queueName, duplicateDetection);
         });
     }
 
@@ -383,6 +455,7 @@ public class ServiceBusNamespaceManager {
             jolokiaExec(http, baseUrl, auth, mbean,
                     "removeAddressSettings(java.lang.String)",
                     jsonArr(queueName));
+            removeDuplicateDetection(http, baseUrl, auth, queueName);
         });
     }
 
@@ -446,7 +519,6 @@ public class ServiceBusNamespaceManager {
         jolokiaExec(http, baseUrl, auth, mbean,
                 "updateQueue(java.lang.String)", jsonArr(queueConfiguration));
     }
-
     private void withJolokia(String namespaceName, JolokiaAction action) {
         NamespaceState state = namespaces.get(namespaceName);
         if (state == null) {

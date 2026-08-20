@@ -67,8 +67,10 @@ public sealed class ServiceBusCompatibilityTests
 
         await using ServiceBusSender topicSender = client.CreateSender(topic);
         await using ServiceBusReceiver subscriptionReceiver = client.CreateReceiver(topic, subscription);
-        await topicSender.SendMessageAsync(new ServiceBusMessage("subscription-dead-letter"), cancellationToken);
-        ServiceBusReceivedMessage subscriptionMessage = await Receive(subscriptionReceiver, cancellationToken);
+        await topicSender.SendMessageAsync(
+            new ServiceBusMessage("subscription-dead-letter"), cancellationToken);
+        ServiceBusReceivedMessage subscriptionMessage =
+            await Receive(subscriptionReceiver, cancellationToken);
         await subscriptionReceiver.DeadLetterMessageAsync(
             subscriptionMessage, cancellationToken: cancellationToken);
 
@@ -174,6 +176,73 @@ public sealed class ServiceBusCompatibilityTests
         await Assert.That(processedMessages[processorSessionB]).IsEqualTo("processor-b");
     }
 
+    [Test]
+    [Timeout(120_000)]
+    public async Task DotnetSdkSuppressesDuplicateMessageIdsForQueuesAndTopics(
+        CancellationToken cancellationToken)
+    {
+        const string serviceBusNamespace = "default";
+        string queue = $"duplicate-{Guid.NewGuid():N}";
+        await EnsureNamespace(serviceBusNamespace, cancellationToken);
+        await EnsureQueue(serviceBusNamespace, queue, cancellationToken, duplicateDetection: true);
+
+        string connectionString =
+            $"Endpoint=sb://{ServiceBusHost}:{ServiceBusPort};" +
+            "SharedAccessKeyName=RootManageSharedAccessKey;" +
+            "SharedAccessKey=devkey;UseDevelopmentEmulator=true;";
+
+        await using var client = new ServiceBusClient(connectionString);
+        await using ServiceBusSender sender = client.CreateSender(queue);
+        await using ServiceBusReceiver receiver = client.CreateReceiver(queue);
+
+        const string messageId = "same-message-id";
+        await sender.SendMessageAsync(
+            new ServiceBusMessage("first") { MessageId = messageId }, cancellationToken);
+        await sender.SendMessageAsync(
+            new ServiceBusMessage("duplicate") { MessageId = messageId }, cancellationToken);
+
+        ServiceBusReceivedMessage first = await Receive(receiver, cancellationToken);
+        await Assert.That(first.Body.ToString()).IsEqualTo("first");
+        await receiver.CompleteMessageAsync(first, cancellationToken);
+        await sender.SendMessageAsync(
+            new ServiceBusMessage("marker") { MessageId = "queue-marker" }, cancellationToken);
+        ServiceBusReceivedMessage marker = await Receive(receiver, cancellationToken);
+        await Assert.That(marker.Body.ToString()).IsEqualTo("marker");
+        await receiver.CompleteMessageAsync(marker, cancellationToken);
+
+        await Task.Delay(TimeSpan.FromSeconds(21), cancellationToken);
+        await sender.SendMessageAsync(
+            new ServiceBusMessage("after-window") { MessageId = messageId }, cancellationToken);
+        ServiceBusReceivedMessage afterWindow = await Receive(receiver, cancellationToken);
+        await Assert.That(afterWindow.Body.ToString()).IsEqualTo("after-window");
+        await receiver.CompleteMessageAsync(afterWindow, cancellationToken);
+
+        string topic = $"duplicate-topic-{Guid.NewGuid():N}";
+        const string subscription = "subscriber";
+        await EnsureTopic(
+            serviceBusNamespace, topic, cancellationToken, duplicateDetection: true);
+        await EnsureSubscription(serviceBusNamespace, topic, subscription, cancellationToken);
+        await using ServiceBusSender topicSender = client.CreateSender(topic);
+        await using ServiceBusReceiver subscriptionReceiver =
+            client.CreateReceiver(topic, subscription);
+
+        await topicSender.SendMessageAsync(
+            new ServiceBusMessage("topic-first") { MessageId = messageId }, cancellationToken);
+        await topicSender.SendMessageAsync(
+            new ServiceBusMessage("topic-duplicate") { MessageId = messageId }, cancellationToken);
+        ServiceBusReceivedMessage topicFirst =
+            await Receive(subscriptionReceiver, cancellationToken);
+        await Assert.That(topicFirst.Body.ToString()).IsEqualTo("topic-first");
+        await subscriptionReceiver.CompleteMessageAsync(topicFirst, cancellationToken);
+        await topicSender.SendMessageAsync(
+            new ServiceBusMessage("topic-marker") { MessageId = "topic-marker" },
+            cancellationToken);
+        ServiceBusReceivedMessage topicMarker =
+            await Receive(subscriptionReceiver, cancellationToken);
+        await Assert.That(topicMarker.Body.ToString()).IsEqualTo("topic-marker");
+        await subscriptionReceiver.CompleteMessageAsync(topicMarker, cancellationToken);
+    }
+
     private static async Task<ServiceBusReceivedMessage> Receive(
         ServiceBusReceiver receiver, CancellationToken cancellationToken)
     {
@@ -197,52 +266,77 @@ public sealed class ServiceBusCompatibilityTests
     }
 
     private static async Task EnsureQueue(
-        string serviceBusNamespace, string queue, CancellationToken cancellationToken,
-        bool requiresSession = false)
+        string serviceBusNamespace,
+        string queue,
+        CancellationToken cancellationToken,
+        bool requiresSession = false,
+        bool duplicateDetection = false)
     {
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
-        using var request = new HttpRequestMessage(HttpMethod.Put,
-            $"{EmulatorEndpoint}/devstoreaccount1-servicebus/{serviceBusNamespace}/queues/{queue}");
-        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/atom+xml"));
-        string body = requiresSession
-            ? "<entry xmlns=\"http://www.w3.org/2005/Atom\"><content type=\"application/xml\">" +
-              "<QueueDescription xmlns=\"http://schemas.microsoft.com/netservices/2010/10/servicebus/connect\">" +
-              "<RequiresSession>true</RequiresSession></QueueDescription></content></entry>"
-            : "";
-        request.Content = new StringContent(body, Encoding.UTF8, "application/atom+xml");
-        HttpResponseMessage response = await http.SendAsync(request, cancellationToken);
-        await Assert.That(response.IsSuccessStatusCode)
-            .IsTrue()
-            .Because($"Queue creation failed: {(int)response.StatusCode} {await response.Content.ReadAsStringAsync(cancellationToken)}");
+        string properties = (requiresSession ? "<RequiresSession>true</RequiresSession>" : "") +
+            (duplicateDetection
+                ? "<RequiresDuplicateDetection>true</RequiresDuplicateDetection>" +
+                  "<DuplicateDetectionHistoryTimeWindow>PT20S</DuplicateDetectionHistoryTimeWindow>"
+                : "");
+        string content = properties.Length == 0
+            ? ""
+            : $"<entry xmlns=\"http://www.w3.org/2005/Atom\"><content type=\"application/xml\">" +
+              $"<QueueDescription xmlns=\"http://schemas.microsoft.com/netservices/2010/10/servicebus/connect\">" +
+              $"{properties}</QueueDescription></content></entry>";
+        await PutEntity(
+            $"{EmulatorEndpoint}/devstoreaccount1-servicebus/{serviceBusNamespace}/queues/{queue}",
+            content,
+            "Queue",
+            cancellationToken);
     }
 
     private static async Task EnsureTopic(
-        string serviceBusNamespace, string topic, CancellationToken cancellationToken)
+        string serviceBusNamespace,
+        string topic,
+        CancellationToken cancellationToken,
+        bool duplicateDetection = false)
     {
-        await EnsureEntity(
+        string description = duplicateDetection
+            ? """
+            <entry xmlns="http://www.w3.org/2005/Atom">
+              <content type="application/xml">
+                <TopicDescription xmlns="http://schemas.microsoft.com/netservices/2010/10/servicebus/connect">
+                  <RequiresDuplicateDetection>true</RequiresDuplicateDetection>
+                  <DuplicateDetectionHistoryTimeWindow>PT20S</DuplicateDetectionHistoryTimeWindow>
+                </TopicDescription>
+              </content>
+            </entry>
+            """
+            : "";
+        await PutEntity(
             $"{EmulatorEndpoint}/devstoreaccount1-servicebus/{serviceBusNamespace}/topics/{topic}",
-            "Topic", cancellationToken);
+            description,
+            "Topic",
+            cancellationToken);
     }
 
-    private static async Task EnsureSubscription(
-        string serviceBusNamespace, string topic, string subscription,
-        CancellationToken cancellationToken)
-    {
-        await EnsureEntity(
-            $"{EmulatorEndpoint}/devstoreaccount1-servicebus/{serviceBusNamespace}/topics/{topic}/subscriptions/{subscription}",
-            "Subscription", cancellationToken);
-    }
+    private static Task EnsureSubscription(
+        string serviceBusNamespace,
+        string topic,
+        string subscription,
+        CancellationToken cancellationToken) =>
+        PutEntity(
+            $"{EmulatorEndpoint}/devstoreaccount1-servicebus/{serviceBusNamespace}/topics/{topic}" +
+            $"/subscriptions/{subscription}",
+            "",
+            "Subscription",
+            cancellationToken);
 
-    private static async Task EnsureEntity(
-        string url, string entityType, CancellationToken cancellationToken)
+    private static async Task PutEntity(
+        string url, string content, string entityType, CancellationToken cancellationToken)
     {
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
         using var request = new HttpRequestMessage(HttpMethod.Put, url);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/atom+xml"));
-        request.Content = new StringContent("", Encoding.UTF8, "application/atom+xml");
+        request.Content = new StringContent(content, Encoding.UTF8, "application/atom+xml");
         HttpResponseMessage response = await http.SendAsync(request, cancellationToken);
         await Assert.That(response.IsSuccessStatusCode)
             .IsTrue()
-            .Because($"{entityType} creation failed: {(int)response.StatusCode} {await response.Content.ReadAsStringAsync(cancellationToken)}");
+            .Because($"{entityType} creation failed: {(int)response.StatusCode} " +
+                     await response.Content.ReadAsStringAsync(cancellationToken));
     }
 }
