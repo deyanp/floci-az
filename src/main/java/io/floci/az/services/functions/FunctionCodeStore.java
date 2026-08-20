@@ -1,6 +1,9 @@
 package io.floci.az.services.functions;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.az.config.EmulatorConfig;
+import io.floci.az.services.functions.FunctionModels.FunctionDefinition;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -9,6 +12,10 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
+import java.util.Objects;
+import java.nio.charset.StandardCharsets;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Manages function code packages on disk.
@@ -18,6 +25,14 @@ import java.util.Comparator;
 public class FunctionCodeStore {
 
     private static final Logger LOG = Logger.getLogger(FunctionCodeStore.class);
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final Pattern ROUTE_DECORATOR = Pattern.compile(
+            "@app\\.route\\s*\\((.*?)\\)\\s*(?:\\r?\\n\\s*@[^\\r\\n]+)*\\s*def\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*\\(",
+            Pattern.DOTALL);
+        private static final Pattern NAMED_ROUTE = Pattern.compile(
+            "\\broute\\s*=\\s*[\\\"']([^\\\"']*)[\\\"']");
+        private static final Pattern POSITIONAL_ROUTE = Pattern.compile(
+            "^\\s*[\\\"']([^\\\"']*)[\\\"']");
 
     private final EmulatorConfig config;
     private final FunctionZipExtractor extractor;
@@ -42,6 +57,65 @@ public class FunctionCodeStore {
 
     public Path getCodePath(String account, String appName, String funcName) {
         return codeDir(account, appName, funcName);
+    }
+
+    public boolean isPackageRootLayout(Path codePath) {
+        return Files.isRegularFile(codePath.resolve("function_app.py"));
+    }
+
+    public String routePrefix(Path codePath) throws IOException {
+        Path hostJson = codePath.resolve("host.json");
+        if (!Files.isRegularFile(hostJson)) {
+            return null;
+        }
+        JsonNode root = MAPPER.readTree(Files.readString(hostJson, StandardCharsets.UTF_8));
+        JsonNode routePrefix = root.path("extensions").path("http").get("routePrefix");
+        return routePrefix != null && routePrefix.isTextual() ? routePrefix.asText() : null;
+    }
+
+    public String functionRoute(Path codePath, String handler) throws IOException {
+        if (!isPackageRootLayout(codePath) || handler == null || handler.isBlank()) {
+            return null;
+        }
+        String methodName = handler.substring(handler.lastIndexOf('.') + 1);
+        String source = Files.readString(codePath.resolve("function_app.py"), StandardCharsets.UTF_8);
+        Matcher decorator = ROUTE_DECORATOR.matcher(source);
+        while (decorator.find()) {
+            if (!methodName.equals(decorator.group(2))) {
+                continue;
+            }
+            String arguments = decorator.group(1);
+            Matcher namedRoute = NAMED_ROUTE.matcher(arguments);
+            if (namedRoute.find()) {
+                return namedRoute.group(1);
+            }
+            Matcher positionalRoute = POSITIONAL_ROUTE.matcher(arguments);
+            return positionalRoute.find() ? positionalRoute.group(1) : methodName;
+        }
+        return null;
+    }
+
+    public FunctionDefinition normalize(FunctionDefinition definition) throws IOException {
+        if (definition.codeLocalPath() == null) {
+            return definition;
+        }
+        Path codePath = Path.of(definition.codeLocalPath());
+        if (!isPackageRootLayout(codePath)) {
+            return definition;
+        }
+        String prefix = definition.routePrefix() == null
+                ? routePrefix(codePath) : definition.routePrefix();
+        String route = definition.functionRoute() == null
+                ? functionRoute(codePath, definition.handler()) : definition.functionRoute();
+        if (definition.packageRootLayout() && Objects.equals(prefix, definition.routePrefix())
+                && Objects.equals(route, definition.functionRoute())) {
+            return definition;
+        }
+        return new FunctionDefinition(
+                definition.appName(), definition.funcName(), definition.accountName(),
+                definition.runtime(), definition.linuxFxVersion(), definition.handler(),
+                definition.timeoutSeconds(), definition.environment(), definition.codeLocalPath(),
+                definition.createdAt(), true, prefix, route);
     }
 
     public void deleteCode(String account, String appName, String funcName) {
