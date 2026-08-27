@@ -559,12 +559,35 @@ public interface EmulatorConfig {
         boolean enabled();
 
         /**
-         * When {@code true}, no SQL Server container is started; servers are created in state and
-         * transition immediately to {@code state=Ready} (no EULA required). The data plane is
-         * unavailable (no live JDBC endpoint). Useful for tests without Docker.
+         * Legacy data-plane switch. Prefer {@code data-plane.provider}. When the provider is not
+         * explicitly configured, {@code true} maps to {@link SqlDataPlaneProvider#NONE} and
+         * {@code false} maps to {@link SqlDataPlaneProvider#MANAGED}.
          */
-        @WithDefault("false")
-        boolean mocked();
+        @Deprecated
+        Optional<Boolean> mocked();
+
+        SqlDataPlaneConfig dataPlane();
+
+        /**
+         * Resolves the explicit provider, then the legacy {@code mocked} alias. When neither is
+         * configured, an accepted EULA preserves the legacy managed data plane; otherwise the
+         * service defaults to control-plane-only behavior.
+         */
+        default SqlDataPlaneProvider dataPlaneProvider() {
+            Optional<SqlDataPlaneProvider> provider = dataPlane().provider();
+            if (provider.isPresent()) {
+                return provider.get();
+            }
+
+            Optional<Boolean> legacyMocked = mocked();
+            if (legacyMocked.isPresent()) {
+                return legacyMocked.get() ? SqlDataPlaneProvider.NONE : SqlDataPlaneProvider.MANAGED;
+            }
+
+            return "Y".equalsIgnoreCase(acceptEula())
+                ? SqlDataPlaneProvider.MANAGED
+                : SqlDataPlaneProvider.NONE;
+        }
 
         /**
          * Must be set to "Y" to accept the Microsoft SQL Server EULA.
@@ -595,6 +618,17 @@ public interface EmulatorConfig {
         /** Default host port. 0 lets the OS pick a free port (recommended when running multiple servers). */
         @WithDefault("0")
         int defaultPort();
+    }
+
+    interface SqlDataPlaneConfig {
+        /** Azure SQL data-plane provider: none, managed, or external. */
+        Optional<SqlDataPlaneProvider> provider();
+    }
+
+    enum SqlDataPlaneProvider {
+        NONE,
+        MANAGED,
+        EXTERNAL
     }
 
     /**
