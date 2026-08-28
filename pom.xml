@@ -261,6 +261,11 @@
                                     failOnNoReplacements="true" />
                                 <replace
                                     file="${project.build.directory}/artemis-amqp-patch-sources/org/apache/activemq/artemis/protocol/amqp/proton/DefaultSenderController.java"
+                                    token="selector = filter.getValue().getDescribed().toString();"
+                                    value="selector = EventHubFilterSupport.rewriteSelector(filter.getValue().getDescribed().toString());"
+                                    failOnNoReplacements="true" />
+                                <replace
+                                    file="${project.build.directory}/artemis-amqp-patch-sources/org/apache/activemq/artemis/protocol/amqp/proton/DefaultSenderController.java"
                                     token="protonSender.setReceiverSettleMode(ReceiverSettleMode.FIRST);"
                                     value="protonSender.setReceiverSettleMode(protonSender.getRemoteReceiverSettleMode());"
                                     failOnNoReplacements="true" />

@@ -1,10 +1,12 @@
 package io.floci.az.artemis;
 
 import org.apache.activemq.artemis.api.core.Message;
+import org.apache.activemq.artemis.api.core.SimpleString;
 import org.apache.activemq.artemis.core.server.ServerSession;
 import org.apache.activemq.artemis.core.transaction.Transaction;
 import org.apache.activemq.artemis.core.server.plugin.ActiveMQServerPlugin;
 
+import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -36,14 +38,23 @@ public final class EventHubPartitionPlugin implements ActiveMQServerPlugin {
 
     /** Property the generated partition diverts filter on. */
     public static final String PARTITION_PROPERTY = "floci_partition";
-    /** Set by senders that pin a message to a partition. */
+    /** Set by senders that pin a message to a partition, and echoed back to consumers. */
     private static final String PARTITION_ID_ANNOTATION = "x-opt-partition-id";
     /** Set by senders that supply a partition key. */
     private static final String PARTITION_KEY_ANNOTATION = "x-opt-partition-key";
-    /** Names the Event Hubs start-position selectors reference. */
-    private static final String OFFSET_ANNOTATION = "amqp.annotation.x-opt-offset";
-    private static final String SEQUENCE_NUMBER_ANNOTATION = "amqp.annotation.x-opt-sequence-number";
-    private static final String ENQUEUED_TIME_ANNOTATION = "amqp.annotation.x-opt-enqueued-time";
+    /** Stream position, as consumers read it back. */
+    private static final String OFFSET_ANNOTATION = "x-opt-offset";
+    private static final String SEQUENCE_NUMBER_ANNOTATION = "x-opt-sequence-number";
+    private static final String ENQUEUED_TIME_ANNOTATION = "x-opt-enqueued-time";
+    /**
+     * Stream position, as a start-position selector matches it. The names are duplicated in
+     * {@code EventHubFilterSupport}, which rewrites the selectors onto them: that class patches
+     * the AMQP protocol jar and this one is a broker plugin, so neither can see the other's
+     * constants.
+     */
+    private static final String OFFSET_PROPERTY = "floci_offset";
+    private static final String SEQUENCE_NUMBER_PROPERTY = "floci_sequence_number";
+    private static final String ENQUEUED_TIME_PROPERTY = "floci_enqueued_time";
     /** Plugin property: "eh1:4,eh2:2". */
     private static final String ENTITIES_PROPERTY = "entities";
 
@@ -105,26 +116,35 @@ public final class EventHubPartitionPlugin implements ActiveMQServerPlugin {
     }
 
     /**
-     * Stamps the stream position a consumer's start position is expressed against.
+     * Stamps the message's position in its partition's stream, twice over.
      *
-     * <p>Every Event Hubs start position becomes an AMQP selector over an annotation — even
-     * "earliest", which is sent as {@code amqp.annotation.x-opt-offset > '-1'}. Artemis reads
-     * annotations in filters only under its own {@code m.} prefix, so those selectors fall through
-     * to an ordinary property lookup by the full name. Naming the properties exactly as the
-     * selectors reference them is therefore what makes start positions work at all.
+     * <p>The annotations are what a consumer reads back: the SDKs take the offset and sequence
+     * number of the last event they handled from {@code x-opt-offset} and
+     * {@code x-opt-sequence-number}, and store them as the checkpoint they later resume from.
      *
-     * <p>The values are strings because the selectors quote their operands, so the comparison is
-     * lexicographic. That is exact for enqueued time, whose millisecond stamps are all the same
-     * width, and for offsets only while they are — a consumer resuming from a specific offset
-     * across a digit boundary is a known limitation of this emulation.
+     * <p>The properties are what the broker matches a resume point against. A start position
+     * reaches Artemis as a selector over those same annotations, which the AMQP patch rewrites
+     * onto these names — hyphens are not legal in a selector identifier, and Artemis compares a
+     * number to a quoted constant only under a thread-local flag, so a parseable selector needs
+     * both an underscored name and a numeric value to match.
+     *
+     * <p>Offsets and sequence numbers are the same counter here: Artemis keeps neither, and a
+     * consumer only needs them to be monotonic per partition for a resume point to mean anything.
      */
     private void stampStreamPosition(Message message, String address, int partition) {
         long sequence = sequences
                 .computeIfAbsent(address + "#" + partition, k -> new AtomicLong())
                 .getAndIncrement();
-        message.putStringProperty(OFFSET_ANNOTATION, Long.toString(sequence));
-        message.putStringProperty(SEQUENCE_NUMBER_ANNOTATION, Long.toString(sequence));
-        message.putStringProperty(ENQUEUED_TIME_ANNOTATION, Long.toString(System.currentTimeMillis()));
+        long enqueuedTime = System.currentTimeMillis();
+
+        message.setAnnotation(SimpleString.of(PARTITION_ID_ANNOTATION), Integer.toString(partition));
+        message.setAnnotation(SimpleString.of(OFFSET_ANNOTATION), Long.toString(sequence));
+        message.setAnnotation(SimpleString.of(SEQUENCE_NUMBER_ANNOTATION), sequence);
+        message.setAnnotation(SimpleString.of(ENQUEUED_TIME_ANNOTATION), new Date(enqueuedTime));
+
+        message.putLongProperty(OFFSET_PROPERTY, sequence);
+        message.putLongProperty(SEQUENCE_NUMBER_PROPERTY, sequence);
+        message.putLongProperty(ENQUEUED_TIME_PROPERTY, enqueuedTime);
     }
 
     private int choosePartition(Message message, String address, int partitionCount) {
