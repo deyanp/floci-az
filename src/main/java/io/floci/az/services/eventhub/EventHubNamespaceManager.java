@@ -6,6 +6,7 @@ import io.floci.az.core.docker.ContainerBuilder;
 import io.floci.az.core.docker.ContainerLifecycleManager;
 import io.floci.az.core.docker.ContainerLifecycleManager.EndpointInfo;
 import io.floci.az.core.docker.ContainerSpec;
+import io.floci.az.services.servicebus.ServiceBusCbsResponder;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -51,6 +52,7 @@ public class EventHubNamespaceManager {
     public record NamespaceState(String containerId, int amqpHostPort, int amqpsHostPort, String tlsCertPem, boolean mocked) {}
 
     private final ConcurrentHashMap<String, NamespaceState> namespaces = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, ServiceBusCbsResponder> cbsResponders = new ConcurrentHashMap<>();
 
     private final EmulatorConfig config;
     private final ContainerBuilder containerBuilder;
@@ -120,6 +122,13 @@ public class EventHubNamespaceManager {
         EndpointInfo amqpsEndpoint = info.getEndpoint(AMQPS_PORT);
         waitForPort(amqpsEndpoint, "AMQPS");
 
+        // Answers the CBS put-token every Azure SDK sends before opening entity links;
+        // the broker.xml divert routes those requests to the intercept queue this
+        // attaches to. Same responder the Service Bus namespaces use.
+        ServiceBusCbsResponder cbs = new ServiceBusCbsResponder(amqpEndpoint.host(), amqpEndpoint.port());
+        cbs.start();
+        cbsResponders.put(namespaceName, cbs);
+
         // Topology is pre-configured in broker.xml; Jolokia setup runs in background
         // to handle any dynamic additions (e.g. consumer groups created after startup).
         EndpointInfo jolokiaEndpoint = info.getEndpoint(JOLOKIA_PORT);
@@ -154,6 +163,10 @@ public class EventHubNamespaceManager {
         NamespaceState state = namespaces.remove(namespaceName);
         if (state == null) {
             return false;
+        }
+        ServiceBusCbsResponder cbs = cbsResponders.remove(namespaceName);
+        if (cbs != null) {
+            cbs.stop();
         }
         if (!state.mocked() && state.containerId() != null) {
             lifecycleManager.stopAndRemove(state.containerId(), null);
