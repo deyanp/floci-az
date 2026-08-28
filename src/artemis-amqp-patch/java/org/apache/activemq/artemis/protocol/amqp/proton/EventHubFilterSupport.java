@@ -47,7 +47,14 @@ public final class EventHubFilterSupport {
     *
     * <p>{@code @latest} has no numeric form. It means "only what arrives from now on", so it
     * becomes a comparison against the clock — read here, as the link attaches, which is the moment
-    * "now" refers to.
+    * "now" refers to. The comparison is inclusive because the clock has only millisecond
+    * resolution: an event enqueued in the same millisecond as the attach is on the wrong side of a
+    * strict {@code >} even when it genuinely arrived afterwards, and would then be excluded
+    * forever. Inclusive instead risks replaying whatever else landed in that one millisecond,
+    * which is a duplicate rather than a loss — and Event Hubs delivery is at-least-once, so a
+    * consumer already has to tolerate one. A monotonic broker-local counter would make the
+    * boundary exact, but it would restart with the broker, and messages outliving it would
+    * compare against an origin that no longer means anything.
     */
    public static String rewriteSelector(String selector) {
       if (selector == null || !selector.contains(ANNOTATION_PREFIX)) {
@@ -55,7 +62,7 @@ public final class EventHubFilterSupport {
       }
 
       String rewritten = LATEST.matcher(selector)
-         .replaceAll(ENQUEUED_TIME_PROPERTY + " > " + System.currentTimeMillis());
+         .replaceAll(ENQUEUED_TIME_PROPERTY + " >= " + System.currentTimeMillis());
 
       rewritten = rewritten
          .replace(ANNOTATION_PREFIX + "x-opt-enqueued-time", ENQUEUED_TIME_PROPERTY)
