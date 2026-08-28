@@ -51,6 +51,7 @@ public class ArtemisConfigGenerator {
 
             for (String hostname : hostnames) {
                 appendAnycastTopology(addresses, diverts, hostname, namespace, entityName, cgs);
+                appendAzureAddressing(addresses, diverts, hostname, namespace, entityName, cgs);
             }
         }
         return buildBrokerXml(addresses, diverts);
@@ -197,6 +198,49 @@ public class ArtemisConfigGenerator {
                      .elem("forwarding-address", cgAddr)
                      .elem("exclusive", true)
                    .end("divert");
+        }
+    }
+
+    /**
+     * Appends the address form the Azure SDKs actually send to: {@code {scheme}://{host}/{entity}},
+     * where the namespace is the HOST and the path is only the hub — no namespace path segment.
+     *
+     * Without this a send matches no configured address, {@code auto-create-addresses} creates one
+     * with no queues bound, and the message is discarded with no error anywhere. Both schemes are
+     * generated because SDKs put {@code amqps} in the address whatever the transport turns out to
+     * be, while some send {@code amqp}.
+     *
+     * The diverts feed the same per-consumer-group queues the uamqp topology uses, so a consumer on
+     * either address form reads the same messages.
+     */
+    private void appendAzureAddressing(XmlBuilder addresses, XmlBuilder diverts,
+                                       String hostname, String namespace, String entity,
+                                       List<String> consumerGroups) {
+        String host = hostname.toLowerCase(java.util.Locale.US);
+        for (String scheme : List.of("amqp", "amqps")) {
+            String entityAddr = scheme + "://" + host + "/" + entity;
+
+            // Non-durable queue so the sender link can attach; the exclusive diverts below take
+            // every message before it reaches this queue.
+            addresses.startAttr("address", "name", entityAddr)
+                       .start("anycast")
+                         .startAttr("queue", "name", entityAddr)
+                           .elem("durable", false)
+                         .end("queue")
+                       .end("anycast")
+                     .end("address");
+
+            for (String cg : consumerGroups) {
+                String targetCgAddr = "amqp://" + host + "/" + namespace + "/" + entity + "/" + cg;
+                String divertName = (scheme + "-" + host + "-" + entity + "-to-" + cg)
+                        .replaceAll("[^A-Za-z0-9_-]", "-");
+
+                diverts.startAttr("divert", "name", divertName)
+                         .elem("address", entityAddr)
+                         .elem("forwarding-address", targetCgAddr)
+                         .elem("exclusive", true)
+                       .end("divert");
+            }
         }
     }
 
