@@ -65,6 +65,8 @@ public class EventHubNamespaceManager {
 
     private final ConcurrentHashMap<String, NamespaceState> namespaces = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ServiceBusCbsResponder> cbsResponders = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, EventHubManagementResponder> managementResponders =
+            new ConcurrentHashMap<>();
 
     private final EmulatorConfig config;
     private final ContainerBuilder containerBuilder;
@@ -163,6 +165,12 @@ public class EventHubNamespaceManager {
         cbs.start();
         cbsResponders.put(namespaceName, cbs);
 
+        // Answers the $management READ every consumer issues before it can attach per partition.
+        EventHubManagementResponder management =
+                new EventHubManagementResponder(amqpEndpoint.host(), amqpEndpoint.port(), entities);
+        management.start();
+        managementResponders.put(namespaceName, management);
+
         // Topology is pre-configured in broker.xml; Jolokia setup runs in background
         // to handle any dynamic additions (e.g. consumer groups created after startup).
         EndpointInfo jolokiaEndpoint = info.getEndpoint(JOLOKIA_PORT);
@@ -204,6 +212,10 @@ public class EventHubNamespaceManager {
         ServiceBusCbsResponder cbs = cbsResponders.remove(namespaceName);
         if (cbs != null) {
             cbs.stop();
+        }
+        EventHubManagementResponder management = managementResponders.remove(namespaceName);
+        if (management != null) {
+            management.stop();
         }
         if (!state.mocked() && state.containerId() != null) {
             lifecycleManager.stopAndRemove(state.containerId(), null);

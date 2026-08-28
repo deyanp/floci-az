@@ -34,6 +34,8 @@ public class ArtemisConfigGenerator {
     static final String PARTITION_PROPERTY = "floci_partition";
     private static final String CBS_ADDRESS = "$cbs";
     private static final String CBS_INTERCEPT_ADDRESS = "$cbs-intercept";
+    private static final String MANAGEMENT_ADDRESS = "$management";
+    private static final String MANAGEMENT_INTERCEPT_ADDRESS = "$management-intercept";
 
     private final EmulatorConfig config;
 
@@ -182,6 +184,14 @@ public class ArtemisConfigGenerator {
                       .selfClose("queue", "name", CBS_INTERCEPT_ADDRESS)
                     .end("anycast")
                   .end("address")
+                  .startAttr("address", "name", MANAGEMENT_ADDRESS)
+                    .selfClose("multicast")
+                  .end("address")
+                  .startAttr("address", "name", MANAGEMENT_INTERCEPT_ADDRESS)
+                    .start("anycast")
+                      .selfClose("queue", "name", MANAGEMENT_INTERCEPT_ADDRESS)
+                    .end("anycast")
+                  .end("address")
                 .end("addresses");
 
         // The CBS divert is unconditional: every Azure SDK puts a token on $cbs before
@@ -194,6 +204,14 @@ public class ArtemisConfigGenerator {
                .elem("address", CBS_ADDRESS)
                .elem("forwarding-address", CBS_INTERCEPT_ADDRESS)
                .selfClose("filter", "string", "operation = 'put-token'")
+               .elem("exclusive", true)
+             .end("divert")
+             // Requests only. Without the filter the responder's own replies, which go back on
+             // $management, would divert straight back to it in a loop.
+             .startAttr("divert", "name", "management-request-intercept")
+               .elem("address", MANAGEMENT_ADDRESS)
+               .elem("forwarding-address", MANAGEMENT_INTERCEPT_ADDRESS)
+               .selfClose("filter", "string", "operation = 'READ'")
                .elem("exclusive", true)
              .end("divert")
            .end("diverts");

@@ -9,6 +9,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Assigns each message an Event Hubs partition as it is routed.
@@ -39,6 +40,10 @@ public final class EventHubPartitionPlugin implements ActiveMQServerPlugin {
     private static final String PARTITION_ID_ANNOTATION = "x-opt-partition-id";
     /** Set by senders that supply a partition key. */
     private static final String PARTITION_KEY_ANNOTATION = "x-opt-partition-key";
+    /** Names the Event Hubs start-position selectors reference. */
+    private static final String OFFSET_ANNOTATION = "amqp.annotation.x-opt-offset";
+    private static final String SEQUENCE_NUMBER_ANNOTATION = "amqp.annotation.x-opt-sequence-number";
+    private static final String ENQUEUED_TIME_ANNOTATION = "amqp.annotation.x-opt-enqueued-time";
     /** Plugin property: "eh1:4,eh2:2". */
     private static final String ENTITIES_PROPERTY = "entities";
 
@@ -47,6 +52,7 @@ public final class EventHubPartitionPlugin implements ActiveMQServerPlugin {
 
     private final Map<String, Integer> partitionCounts = new HashMap<>();
     private final ConcurrentHashMap<String, AtomicInteger> roundRobin = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, AtomicLong> sequences = new ConcurrentHashMap<>();
 
     @Override
     public void init(Map<String, String> properties) {
@@ -92,9 +98,33 @@ public final class EventHubPartitionPlugin implements ActiveMQServerPlugin {
         // the CBS divert, the one filter on an AMQP application property already known to work
         // here.
         message.putStringProperty(PARTITION_PROPERTY, Integer.toString(partition));
+        stampStreamPosition(message, address, partition);
         // An AMQP message serves its properties from its encoded form, so a property set here is
         // invisible to the divert filters until the message is re-encoded.
         message.reencode();
+    }
+
+    /**
+     * Stamps the stream position a consumer's start position is expressed against.
+     *
+     * <p>Every Event Hubs start position becomes an AMQP selector over an annotation — even
+     * "earliest", which is sent as {@code amqp.annotation.x-opt-offset > '-1'}. Artemis reads
+     * annotations in filters only under its own {@code m.} prefix, so those selectors fall through
+     * to an ordinary property lookup by the full name. Naming the properties exactly as the
+     * selectors reference them is therefore what makes start positions work at all.
+     *
+     * <p>The values are strings because the selectors quote their operands, so the comparison is
+     * lexicographic. That is exact for enqueued time, whose millisecond stamps are all the same
+     * width, and for offsets only while they are — a consumer resuming from a specific offset
+     * across a digit boundary is a known limitation of this emulation.
+     */
+    private void stampStreamPosition(Message message, String address, int partition) {
+        long sequence = sequences
+                .computeIfAbsent(address + "#" + partition, k -> new AtomicLong())
+                .getAndIncrement();
+        message.putStringProperty(OFFSET_ANNOTATION, Long.toString(sequence));
+        message.putStringProperty(SEQUENCE_NUMBER_ANNOTATION, Long.toString(sequence));
+        message.putStringProperty(ENQUEUED_TIME_ANNOTATION, Long.toString(System.currentTimeMillis()));
     }
 
     private int choosePartition(Message message, String address, int partitionCount) {
