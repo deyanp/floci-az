@@ -186,7 +186,10 @@ public class EventHubNamespaceManager {
      *
      * @return {@code true} if the namespace existed and was stopped; {@code false} if unknown
      */
-    public boolean stopNamespace(String namespaceName) {
+    public synchronized boolean stopNamespace(String namespaceName) {
+        // Shares startNamespace's lock: a delete arriving mid-start would otherwise see
+        // no namespace, clean nothing up, and let the start it raced publish a namespace
+        // the caller had already deleted — leaving its container and responder running.
         NamespaceState state = namespaces.remove(namespaceName);
         if (state == null) {
             return false;
