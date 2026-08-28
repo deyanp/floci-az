@@ -59,6 +59,9 @@ public class EventHubNamespaceManager {
     private static final String PROTON_J_PATH = "/opt/activemq-artemis/lib/proton-j-0.34.1.jar";
     private static final String ARTEMIS_AMQP_PATH =
             "/opt/activemq-artemis/lib/artemis-amqp-protocol-2.44.0.jar";
+    static final String ARTEMIS_EXTENSION_RESOURCE = "/artemis/servicebus-artemis-extension.jar";
+    private static final String ARTEMIS_EXTENSION_PATH =
+            "/var/lib/artemis-instance/lib/floci-az-artemis-extension.jar";
 
     private final ConcurrentHashMap<String, NamespaceState> namespaces = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ServiceBusCbsResponder> cbsResponders = new ConcurrentHashMap<>();
@@ -87,7 +90,7 @@ public class EventHubNamespaceManager {
      * Host ports of {@code 0} mean "allocate dynamically".
      */
     public synchronized NamespaceState startNamespace(String namespaceName,
-                                          Map<String, List<String>> entities,
+                                          Map<String, ArtemisConfigGenerator.EntitySpec> entities,
                                           int amqpHostPort, int amqpsHostPort) {
         // Synchronized, and re-checking inside the lock, as the Service Bus manager does:
         // the handler's own existence check is not atomic with this call, so two
@@ -141,6 +144,10 @@ public class EventHubNamespaceManager {
                 PROTON_J_PATH);
         lifecycleManager.copyBytesToContainer(containerId, loadResource(ARTEMIS_AMQP_PATCH_RESOURCE),
                 ARTEMIS_AMQP_PATH);
+        // Carries EventHubPartitionPlugin, which stamps the partition each message belongs to;
+        // the generated partition diverts filter on what it sets.
+        lifecycleManager.copyBytesToContainer(containerId, loadResource(ARTEMIS_EXTENSION_RESOURCE),
+                ARTEMIS_EXTENSION_PATH);
 
         ContainerLifecycleManager.ContainerInfo info = lifecycleManager.startCreated(containerId, spec);
 
@@ -265,7 +272,7 @@ public class EventHubNamespaceManager {
      * Sender targets entity address; exclusive diverts fan out to each consumer group's durable queue.
      */
     private void setupAmqpTopology(EndpointInfo jolokia, String namespace,
-                                    Map<String, List<String>> entities, List<String> hostnames) {
+                                    Map<String, ArtemisConfigGenerator.EntitySpec> entities, List<String> hostnames) {
         String baseUrl = "http://" + jolokia + "/console/jolokia";
         String auth = Base64.getEncoder().encodeToString(
                 "artemis:artemis".getBytes(StandardCharsets.UTF_8));
@@ -273,7 +280,7 @@ public class EventHubNamespaceManager {
         HttpClient http = HttpClient.newHttpClient();
 
         for (String hostname : hostnames) {
-            for (Map.Entry<String, List<String>> entry : entities.entrySet()) {
+            for (Map.Entry<String, ArtemisConfigGenerator.EntitySpec> entry : entities.entrySet()) {
                 String entityName = entry.getKey();
                 // Address and divert name both have to match what ArtemisConfigGenerator wrote
                 // into broker.xml. The diverts are exclusive, so where the two disagree the broker
@@ -285,7 +292,7 @@ public class EventHubNamespaceManager {
                         "createAddress(java.lang.String,java.lang.String)",
                         jsonArr(entityAddr, "ANYCAST"));
 
-                for (String cg : entry.getValue()) {
+                for (String cg : entry.getValue().consumerGroups()) {
                     String cgAddr = entityAddr + "/" + cg;
                     String divertName =
                             ArtemisConfigGenerator.anycastDivertName(hostname, entityName, cg);

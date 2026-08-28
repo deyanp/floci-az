@@ -26,6 +26,12 @@ import java.util.Map;
 public class ArtemisConfigGenerator {
 
     private static final String DEFAULT_CONSUMER_GROUP = "$Default";
+    /** A hub configured without an explicit count is one undivided stream. */
+    static final int DEFAULT_PARTITION_COUNT = 1;
+    /** Azure's own per-hub limit outside dedicated clusters. */
+    static final int MAX_PARTITION_COUNT = 32;
+    /** Message property carrying the assigned partition; set by the broker plugin, filtered on here. */
+    static final String PARTITION_PROPERTY = "floci_partition";
     private static final String CBS_ADDRESS = "$cbs";
     private static final String CBS_INTERCEPT_ADDRESS = "$cbs-intercept";
 
@@ -37,25 +43,34 @@ public class ArtemisConfigGenerator {
     }
 
     /** Returns broker.xml for the given namespace and entities (used for dynamic namespace creation). */
-    public String generate(String namespace, Map<String, List<String>> entities) {
+    public String generate(String namespace, Map<String, EntitySpec> entities) {
         String containerName = "floci-az-artemis-" + namespace;
         List<String> hostnames = List.of("localhost", containerName);
 
         XmlBuilder addresses = new XmlBuilder();
         XmlBuilder diverts = new XmlBuilder();
+        // Passed to the partition plugin so it knows how many partitions each hub has.
+        StringBuilder partitionSpec = new StringBuilder();
 
-        for (Map.Entry<String, List<String>> entry : entities.entrySet()) {
+        for (Map.Entry<String, EntitySpec> entry : entities.entrySet()) {
             String entityName = entry.getKey();
-            List<String> cgs = entry.getValue();
+            List<String> cgs = entry.getValue().consumerGroups();
+            int partitions = entry.getValue().partitionCount();
+
+            if (!partitionSpec.isEmpty()) {
+                partitionSpec.append(',');
+            }
+            partitionSpec.append(entityName).append(':').append(partitions);
 
             appendMulticastAddress(addresses, namespace + "/" + entityName, cgs);
 
             for (String hostname : hostnames) {
                 appendAnycastTopology(addresses, diverts, hostname, namespace, entityName, cgs);
                 appendAzureAddressing(addresses, diverts, hostname, namespace, entityName, cgs);
+                appendPartitionTopology(addresses, diverts, hostname, entityName, cgs, partitions);
             }
         }
-        return buildBrokerXml(addresses, diverts);
+        return buildBrokerXml(addresses, diverts, partitionSpec.toString());
     }
 
     /** Returns broker.xml using the default namespace/entities from config. */
@@ -64,29 +79,64 @@ public class ArtemisConfigGenerator {
         return generate(eh.defaultNamespace(), parseEntities(eh.entities(), eh.consumerGroups()));
     }
 
+    /** An event hub's partition count and its consumer groups. */
+    public record EntitySpec(int partitionCount, List<String> consumerGroups) {}
+
     /**
-     * Parses "eh1:4,eh2:2" and a consumer groups string into entityName → consumer group list.
-     * The partition count in the entities string is accepted but ignored (Artemis handles routing).
+     * Parses "eh1:4,eh2:2" and a consumer groups string into entityName → {@link EntitySpec}.
+     *
+     * A hub named without a count gets {@link #DEFAULT_PARTITION_COUNT}, which keeps the single
+     * undivided stream this emulated before partitions existed. The count is now load-bearing —
+     * it decides how many queues and diverts each consumer group gets — so it is validated rather
+     * than ignored: it must be a positive number, and no larger than {@link #MAX_PARTITION_COUNT},
+     * the limit Azure applies outside dedicated clusters. Each partition costs a durable queue per
+     * consumer group, so an unbounded count multiplies quietly into thousands of queues.
      */
-    public static Map<String, List<String>> parseEntities(String entitiesStr, String consumerGroupsStr) {
-        Map<String, List<String>> result = new LinkedHashMap<>();
+    public static Map<String, EntitySpec> parseEntities(String entitiesStr, String consumerGroupsStr) {
+        Map<String, EntitySpec> result = new LinkedHashMap<>();
         List<String> groups = parseConsumerGroups(consumerGroupsStr);
         if (entitiesStr == null || entitiesStr.isBlank()) {
-            result.put("eh1", groups);
+            result.put("eh1", new EntitySpec(DEFAULT_PARTITION_COUNT, groups));
             return result;
         }
         for (String token : entitiesStr.split(",")) {
             token = token.trim();
             if (token.isEmpty()) continue;
-            String name = token.split(":")[0].trim();
-            result.put(name, groups);
+            String[] parts = token.split(":", 2);
+            String name = parts[0].trim();
+            if (name.isEmpty()) continue;
+            result.put(name, new EntitySpec(parsePartitionCount(name, parts), groups));
         }
         return result;
     }
 
+    private static int parsePartitionCount(String entityName, String[] parts) {
+        if (parts.length < 2 || parts[1].isBlank()) {
+            return DEFAULT_PARTITION_COUNT;
+        }
+        String raw = parts[1].trim();
+        int count;
+        try {
+            count = Integer.parseInt(raw);
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(
+                    "Event hub '" + entityName + "': partition count '" + raw + "' is not a number");
+        }
+        if (count < 1) {
+            throw new IllegalArgumentException(
+                    "Event hub '" + entityName + "': partition count must be at least 1, got " + count);
+        }
+        if (count > MAX_PARTITION_COUNT) {
+            throw new IllegalArgumentException(
+                    "Event hub '" + entityName + "': partition count " + count + " exceeds the maximum of "
+                    + MAX_PARTITION_COUNT);
+        }
+        return count;
+    }
+
     // ── Private helpers ──────────────────────────────────────────────────────
 
-    private String buildBrokerXml(XmlBuilder addresses, XmlBuilder diverts) {
+    private String buildBrokerXml(XmlBuilder addresses, XmlBuilder diverts, String partitionSpec) {
         XmlBuilder xml = new XmlBuilder()
             .start("configuration", "urn:activemq")
               .start("core", "urn:activemq:core")
@@ -108,6 +158,12 @@ public class ArtemisConfigGenerator {
                   .end("acceptor")
                 .end("acceptors")
                 .elem("security-enabled", false)
+                .start("broker-plugins")
+                  .startAttr("broker-plugin", "class-name",
+                          "io.floci.az.artemis.EventHubPartitionPlugin")
+                    .selfClose("property", "key", "entities", "value", partitionSpec)
+                  .end("broker-plugin")
+                .end("broker-plugins")
                 .start("address-settings")
                   .startAttr("address-setting", "match", "#")
                     .elem("auto-create-queues", true)
@@ -229,15 +285,55 @@ public class ArtemisConfigGenerator {
                        .end("anycast")
                      .end("address");
 
-            for (String cg : consumerGroups) {
-                String targetCgAddr = "amqp://" + host + "/" + namespace + "/" + entity + "/" + cg;
-                String divertName = divertName(scheme, host, entity, "to", cg);
+        }
+        // Routing out of this address belongs to appendPartitionTopology: every message goes to
+        // one partition queue per consumer group. Diverting here as well would deliver each
+        // message twice — once to a partition and once to the unpartitioned consumer-group queue.
+    }
 
-                diverts.startAttr("divert", "name", divertName)
-                         .elem("address", entityAddr)
-                         .elem("forwarding-address", targetCgAddr)
-                         .elem("exclusive", true)
-                       .end("divert");
+    /**
+     * Appends the partitioned consumer topology: one durable queue per (consumer group, partition)
+     * at the address SDKs attach their receiver to,
+     * {@code {scheme}://{host}/{entity}/ConsumerGroups/{group}/Partitions/{n}}.
+     *
+     * Each partition is fed by its own divert from the entity address, filtered on the partition
+     * property that {@code EventHubPartitionPlugin} stamps as the message is routed. A message
+     * therefore reaches exactly one partition per consumer group, which is the Event Hubs
+     * guarantee — every consumer group sees the whole stream, each event in one partition of it.
+     */
+    private void appendPartitionTopology(XmlBuilder addresses, XmlBuilder diverts,
+                                         String hostname, String entity,
+                                         List<String> consumerGroups, int partitionCount) {
+        String host = hostname.toLowerCase(java.util.Locale.US);
+        for (String scheme : List.of("amqp", "amqps")) {
+            String entityAddr = scheme + "://" + host + "/" + entity;
+            for (String cg : consumerGroups) {
+                for (int partition = 0; partition < partitionCount; partition++) {
+                    String partitionAddr = entityAddr + "/ConsumerGroups/" + cg + "/Partitions/" + partition;
+                    String divertName = (scheme + "-" + host + "-" + entity + "-" + cg + "-p" + partition)
+                            .replaceAll("[^A-Za-z0-9_-]", "-");
+
+                    addresses.startAttr("address", "name", partitionAddr)
+                               .start("anycast")
+                                 .startAttr("queue", "name", partitionAddr)
+                                   .elem("durable", true)
+                                 .end("queue")
+                               .end("anycast")
+                             .end("address");
+
+                    diverts.startAttr("divert", "name", divertName)
+                             .elem("address", entityAddr)
+                             .elem("forwarding-address", partitionAddr)
+                             .selfClose("filter", "string",
+                                     PARTITION_PROPERTY + " = '" + partition + "'")
+                             // Exclusive, so a routed message does not also stay in the entity
+                             // address's own queue. That queue exists only so the sender link can
+                             // attach; nothing consumes it, so a copy left there is never drained.
+                             // Each consumer group still gets its own copy — one divert per
+                             // (group, partition), and only the matching partition's filter passes.
+                             .elem("exclusive", true)
+                           .end("divert");
+                }
             }
         }
     }
