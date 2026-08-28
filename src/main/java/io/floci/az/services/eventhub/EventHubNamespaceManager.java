@@ -77,9 +77,18 @@ public class EventHubNamespaceManager {
      * Starts an Artemis container for the given namespace and registers it.
      * Host ports of {@code 0} mean "allocate dynamically".
      */
-    public NamespaceState startNamespace(String namespaceName,
+    public synchronized NamespaceState startNamespace(String namespaceName,
                                           Map<String, List<String>> entities,
                                           int amqpHostPort, int amqpsHostPort) {
+        // Synchronized, and re-checking inside the lock, as the Service Bus manager does:
+        // the handler's own existence check is not atomic with this call, so two
+        // overlapping creates would otherwise each start a broker and a responder, and
+        // the second registration would orphan the first — leaking a daemon thread and
+        // its Proton reactor's file descriptors.
+        NamespaceState existing = namespaces.get(namespaceName);
+        if (existing != null) {
+            return existing;
+        }
         String containerName = containerName(namespaceName);
         List<String> amqpHostnames = List.of("localhost", containerName);
 
