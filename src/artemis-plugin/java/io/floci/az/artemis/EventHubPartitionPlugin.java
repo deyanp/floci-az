@@ -148,7 +148,7 @@ public final class EventHubPartitionPlugin implements ActiveMQServerPlugin {
     }
 
     private int choosePartition(Message message, String address, int partitionCount) {
-        Object pinned = message.getObjectProperty(PARTITION_ID_ANNOTATION);
+        Object pinned = addressingHint(message, PARTITION_ID_ANNOTATION);
         if (pinned != null) {
             try {
                 int id = Integer.parseInt(pinned.toString().trim());
@@ -164,7 +164,7 @@ public final class EventHubPartitionPlugin implements ActiveMQServerPlugin {
             }
         }
 
-        Object key = message.getObjectProperty(PARTITION_KEY_ANNOTATION);
+        Object key = addressingHint(message, PARTITION_KEY_ANNOTATION);
         if (key != null) {
             return Math.floorMod(key.toString().hashCode(), partitionCount);
         }
@@ -172,6 +172,19 @@ public final class EventHubPartitionPlugin implements ActiveMQServerPlugin {
         return Math.floorMod(
                 roundRobin.computeIfAbsent(address, a -> new AtomicInteger()).getAndIncrement(),
                 partitionCount);
+    }
+
+    /**
+     * Reads a sender's partition id or key, wherever the client put it.
+     *
+     * The Azure SDKs send both as message annotations, and an annotation is not an application
+     * property: {@code getObjectProperty} looks only at the latter, so reading it alone loses
+     * every partition key and quietly round-robins instead. Some clients do set an application
+     * property of the same name, so that stays as the fallback.
+     */
+    private static Object addressingHint(Message message, String name) {
+        Object annotation = message.getAnnotation(SimpleString.of(name));
+        return annotation != null ? annotation : message.getObjectProperty(name);
     }
 
     /**
