@@ -182,8 +182,7 @@ public class ArtemisConfigGenerator {
 
         for (String cg : consumerGroups) {
             String cgAddr = entityAddr + "/" + cg;
-            String divertName = (hostname + "-" + entity + "-to-" + cg)
-                    .replaceAll("[^A-Za-z0-9_-]", "-");
+            String divertName = divertName(hostname, entity, "to", cg);
 
             addresses.startAttr("address", "name", cgAddr)
                        .start("anycast")
@@ -232,8 +231,7 @@ public class ArtemisConfigGenerator {
 
             for (String cg : consumerGroups) {
                 String targetCgAddr = "amqp://" + host + "/" + namespace + "/" + entity + "/" + cg;
-                String divertName = (scheme + "-" + host + "-" + entity + "-to-" + cg)
-                        .replaceAll("[^A-Za-z0-9_-]", "-");
+                String divertName = divertName(scheme, host, entity, "to", cg);
 
                 diverts.startAttr("divert", "name", divertName)
                          .elem("address", entityAddr)
@@ -242,6 +240,26 @@ public class ArtemisConfigGenerator {
                        .end("divert");
             }
         }
+    }
+
+    /**
+     * A divert name that is readable and cannot collide with another one.
+     *
+     * Artemis skips a duplicate binding without saying so, which would leave one consumer group's
+     * queue receiving nothing while every send still succeeded. Two diverts reducing to the same
+     * name is easy to arrange: Azure allows dots in a hub or consumer-group name and Artemis names
+     * should not carry them, so {@code eh.1} and {@code eh-1} sanitize alike; and the separator
+     * between the parts is legal inside a part, so entity {@code a-to-b} with group {@code c}
+     * joins to the same string as entity {@code a} with group {@code b-to-c}.
+     *
+     * The suffix is what makes the name unique — a hash over the exact parts, built from
+     * {@link String#hashCode()}, whose value the language specification pins so the generated
+     * broker.xml is the same on every run and every JVM. The readable part is kept in front of it
+     * so the file can still be read.
+     */
+    private static String divertName(String... parts) {
+        String readable = String.join("-", parts).replaceAll("[^A-Za-z0-9_-]", "-");
+        return readable + "-" + Integer.toHexString(List.of(parts).hashCode());
     }
 
     private static List<String> parseConsumerGroups(String raw) {
