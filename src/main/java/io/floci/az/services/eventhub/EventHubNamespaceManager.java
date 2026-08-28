@@ -51,6 +51,15 @@ public class EventHubNamespaceManager {
      */
     public record NamespaceState(String containerId, int amqpHostPort, int amqpsHostPort, String tlsCertPem, boolean mocked) {}
 
+    // Artemis library patches, shared with the Service Bus broker — see where they are
+    // copied in below for why each is needed.
+    static final String PROTON_PATCH_RESOURCE = "/artemis/proton-j-0.34.1-floci-az-proton-patch.jar";
+    static final String ARTEMIS_AMQP_PATCH_RESOURCE =
+            "/artemis/artemis-amqp-protocol-2.44.0-floci-az-artemis-amqp-patch.jar";
+    private static final String PROTON_J_PATH = "/opt/activemq-artemis/lib/proton-j-0.34.1.jar";
+    private static final String ARTEMIS_AMQP_PATH =
+            "/opt/activemq-artemis/lib/artemis-amqp-protocol-2.44.0.jar";
+
     private final ConcurrentHashMap<String, NamespaceState> namespaces = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ServiceBusCbsResponder> cbsResponders = new ConcurrentHashMap<>();
 
@@ -123,6 +132,15 @@ public class EventHubNamespaceManager {
                 "/var/lib/artemis-instance/etc-override/broker.xml");
         lifecycleManager.copyBytesToContainer(containerId, tls.pkcs12Bytes(),
                 "/var/lib/artemis-instance/etc-override/artemis.p12");
+        // The same two library patches the Service Bus broker gets. Artemis never
+        // advertises max-message-size on ATTACH (spec-legal: unset means "no limit"),
+        // but the Azure SDKs read the absent field as a zero-byte limit and reject
+        // every send — so the patched proton-j sets it. The patched amqp-protocol
+        // carries the MSSBCBS SASL mechanism the acceptors offer.
+        lifecycleManager.copyBytesToContainer(containerId, loadResource(PROTON_PATCH_RESOURCE),
+                PROTON_J_PATH);
+        lifecycleManager.copyBytesToContainer(containerId, loadResource(ARTEMIS_AMQP_PATCH_RESOURCE),
+                ARTEMIS_AMQP_PATH);
 
         ContainerLifecycleManager.ContainerInfo info = lifecycleManager.startCreated(containerId, spec);
 
@@ -339,5 +357,17 @@ public class EventHubNamespaceManager {
         }
         throw new RuntimeException(
                 "Artemis did not open " + label + " port " + endpoint + " within 60s");
+    }
+
+    private static byte[] loadResource(String resource) {
+        try (java.io.InputStream stream =
+                EventHubNamespaceManager.class.getResourceAsStream(resource)) {
+            if (stream == null) {
+                throw new IllegalStateException("Embedded Artemis resource not found: " + resource);
+            }
+            return stream.readAllBytes();
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to read embedded Artemis resource: " + resource, e);
+        }
     }
 }
