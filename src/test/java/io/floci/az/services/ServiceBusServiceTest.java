@@ -58,6 +58,77 @@ public class ServiceBusServiceTest {
     }
 
     @Test
+    void apiVersionDoesNotOverrideAnotherServicesAccountSuffix() {
+        given()
+            .when().get("/routing-appconfig-appconfig/kv?api-version=2024-09-01")
+            .then()
+            .statusCode(200)
+            .body(containsString("\"items\""));
+    }
+
+    @Test
+    void dotNetAdministrationClientCanUseEntityNameEndingInAccountSuffix() {
+        given()
+            .header("User-Agent", "azsdk-net-Messaging.ServiceBus/7.20.1")
+            .queryParam("api-version", "2021-05")
+            .body(entry("<QueueDescription xmlns=\"" + SB_NS + "\"/>"))
+            .when().put("/orders-queue")
+            .then()
+            .statusCode(201)
+            .contentType("application/atom+xml")
+            .body(containsString("<QueueDescription"));
+    }
+
+    @Test
+    void dotNetAdministrationClientCanUseEntityNameEndingInServiceBusSuffix() {
+        given()
+            .header("User-Agent", "azsdk-net-Messaging.ServiceBus/7.20.1")
+            .queryParam("api-version", "2021-05")
+            .body(entry("<QueueDescription xmlns=\"" + SB_NS + "\"/>"))
+            .when().put("/orders-servicebus")
+            .then()
+            .statusCode(201)
+            .contentType("application/atom+xml")
+            .body(containsString("<QueueDescription"));
+    }
+
+    @Test
+    void dotNetAdministrationClientCanUseExplicitServiceBusAccountPrefix() {
+        given()
+            .header("User-Agent", "azsdk-net-Messaging.ServiceBus/7.20.1")
+            .queryParam("api-version", "2021-05")
+            .body(entry("<QueueDescription xmlns=\"" + SB_NS + "\"/>"))
+            .when().put(BASE + "/explicit-dotnet")
+            .then()
+            .statusCode(201)
+            .contentType("application/atom+xml")
+            .body(containsString("<QueueDescription"));
+    }
+
+    @Test
+    void atomPubClientCanUseEntityNameEndingInAccountSuffix() {
+        given()
+            .contentType("application/atom+xml")
+            .accept("application/atom+xml")
+            .body(entry("<QueueDescription xmlns=\"" + SB_NS + "\"/>"))
+            .when().put("/atom-orders-queue")
+            .then()
+            .statusCode(201)
+            .contentType("application/atom+xml")
+            .body(containsString("<QueueDescription"));
+    }
+
+    @Test
+    void explicitServiceBusAccountSuffixStillStripsPrefixForAtomPub() {
+        given()
+            .contentType("application/atom+xml")
+            .body("")
+            .when().put("/devstoreaccount1-servicebus/default/queues/atom-explicit")
+            .then()
+            .statusCode(201);
+    }
+
+    @Test
     void queuePersistsDuplicateDetectionSettings() {
         String body = entry("<QueueDescription xmlns=\"" + SB_NS + "\">"
                 + "<RequiresDuplicateDetection>true</RequiresDuplicateDetection>"

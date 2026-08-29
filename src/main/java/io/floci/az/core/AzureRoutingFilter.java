@@ -497,14 +497,25 @@ public class AzureRoutingFilter {
 
     /** Service Bus root-level spec paths (e.g. {@code $namespaceinfo}, {@code $Resources/...}) or AtomPub XML. */
     private Outcome routeServiceBusAtomPub(RoutingContext ctx) {
-        if (ctx.firstSegment().endsWith("-servicebus")) {
-            return Fallthrough.TO_NEXT_STAGE; // account-suffix routing owns it
-        }
         ContainerRequestContext rc = ctx.requestContext();
         String contentType = rc.getHeaderString(HttpHeaders.CONTENT_TYPE);
         String accept = rc.getHeaderString(HttpHeaders.ACCEPT);
-        boolean isServiceBusRequest = (contentType != null && contentType.contains("application/atom+xml"))
-            || (accept != null && accept.contains("application/atom+xml"))
+        String userAgent = rc.getHeaderString(HttpHeaders.USER_AGENT);
+        boolean isAtomPub = (contentType != null && contentType.contains("application/atom+xml"))
+            || (accept != null && accept.contains("application/atom+xml"));
+        boolean isDotNetAdministrationClient = userAgent != null
+            && userAgent.contains("azsdk-net-Messaging.ServiceBus/")
+            && rc.getUriInfo().getQueryParameters().containsKey("api-version");
+        SuffixRoute accountSuffix = matchSuffix(accountSuffixRoutes, ctx.firstSegment());
+        boolean hasExplicitServiceBusAccountPrefix = accountSuffix != null
+            && "servicebus".equals(accountSuffix.serviceType())
+            && !ctx.resourcePath().isEmpty();
+        if (accountSuffix != null
+                && (hasExplicitServiceBusAccountPrefix
+                    || (!isAtomPub && !isDotNetAdministrationClient))) {
+            return Fallthrough.TO_NEXT_STAGE; // account-suffix routing owns it
+        }
+        boolean isServiceBusRequest = isAtomPub || isDotNetAdministrationClient
             || ctx.path().startsWith("$namespaceinfo")
             || ctx.path().startsWith("$Resources");
         if (!isServiceBusRequest) {
