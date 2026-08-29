@@ -36,19 +36,29 @@ public final class AmqpEntityAddress {
       if (address == null) {
          return null;
       }
-      int schemeEnd = address.indexOf("://");
+      // Unconditional, and not only for the addresses reduced below: clients send an entity path
+      // with a leading slash as readily as without one, Service Bus among them, and an address
+      // that keeps it matches nothing.
+      String path = stripLeadingSlashes(address);
+
+      int schemeEnd = path.indexOf("://");
       if (schemeEnd < 0) {
-         return address;
+         return path;
       }
-      int hostEnd = address.indexOf('/', schemeEnd + 3);
-      if (hostEnd < 0 || hostEnd == address.length() - 1) {
-         return address;
+      int hostEnd = path.indexOf('/', schemeEnd + 3);
+      if (hostEnd < 0 || hostEnd == path.length() - 1) {
+         return path;
       }
-      String path = address.substring(hostEnd + 1);
-      while (path.startsWith("/")) {
-         path = path.substring(1);
+      String afterHost = stripLeadingSlashes(path.substring(hostEnd + 1));
+      return isEventHubPath(afterHost) ? afterHost : path;
+   }
+
+   private static String stripLeadingSlashes(String value) {
+      int i = 0;
+      while (i < value.length() && value.charAt(i) == '/') {
+         i++;
       }
-      return isEventHubPath(path) ? path : address;
+      return value.substring(i);
    }
 
    /** True for {@code entity}, {@code entity/Partitions/n} and the consumer-group form. */
