@@ -14,6 +14,7 @@ against a real SQL Server 2025 container.
 - **Connection policy** — GET returns `Default` (read-only)
 - **Name availability check** — `POST .../checkNameAvailability`
 - **Data-plane providers** — `none` (default), `managed`, and reserved `external`
+- **Asynchronous managed provisioning** — server `PUT` returns `202` with Azure `Location` polling
 - **Connection strings** — managed mode returns JDBC, ADO.NET, pyodbc, and EF Core strings
 - **EULA guard** — managed server creation requires `FLOCI_AZ_SERVICES_SQL_ACCEPT_EULA=Y`
 
@@ -36,6 +37,13 @@ The deprecated `mocked` setting remains a compatibility alias when `data-plane.p
 For upgrade compatibility, `accept-eula: "Y"` also selects `managed` when neither
 `data-plane.provider` nor `mocked` is configured. An explicit provider or legacy `mocked` value
 always takes precedence.
+
+Managed server creation does not wait for image pull or engine startup on the request thread. A new
+server is persisted with `state=Creating` and returns `202 Accepted`, `Location`, and `Retry-After`.
+Poll `Location` until it returns `200` with `status=Succeeded`; failed provisioning returns a non-2xx
+ARM error envelope containing the provisioning error code and message. Server GET exposes the
+corresponding `Creating`, `Ready`, or `Failed` resource state. Equivalent PUT retries reuse the same
+operation; conflicting updates during provisioning return `409 ConflictingServerOperation`.
 
 ---
 
@@ -102,8 +110,8 @@ curl -s -X PUT \
   }'
 ```
 
-> In managed mode, first call starts the container and waits for SQL Server to become ready (~30 s with
-> a cached image, longer on the first pull of the SQL Server image).
+> In managed mode, first call returns promptly with `202 Accepted`; image pull and SQL Server startup
+> continue in the background. Follow the `Location` header before requesting connection strings.
 
 ### 2 — Get connection strings
 
