@@ -11,6 +11,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ArtemisConfigGeneratorTest {
 
@@ -52,6 +53,27 @@ class ArtemisConfigGeneratorTest {
         assertAllDistinct(divertNames("ns", Map.of(
                 "a-to-b", List.of("c"),
                 "a", List.of("b-to-c"))));
+    }
+
+    /**
+     * EventHubNamespaceManager rebuilds this same topology over Jolokia, naming it through
+     * {@code anycastEntityAddress} and {@code anycastDivertName}. If the generator ever spells
+     * either one itself again the two drift apart, and because the diverts are exclusive the
+     * broker holds two of them over one route — which does not fail, it just delivers every
+     * message twice.
+     */
+    @Test
+    void anycastDivertsAreNamedThroughTheSharedHelpers() {
+        String brokerXml = new ArtemisConfigGenerator(null)
+                .generate("ns", Map.of("eh1", List.of("$Default")));
+
+        String expected = "<divert name=\""
+                + ArtemisConfigGenerator.anycastDivertName("localhost", "eh1", "$Default")
+                + "\"><address>"
+                + ArtemisConfigGenerator.anycastEntityAddress("localhost", "ns", "eh1")
+                + "</address>";
+        assertTrue(brokerXml.contains(expected),
+                "the generator no longer names its diverts the way the namespace manager does");
     }
 
     /** The generated file must not change between runs, or every namespace restart rewrites it. */

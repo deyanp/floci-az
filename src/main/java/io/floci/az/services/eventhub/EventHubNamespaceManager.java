@@ -275,7 +275,11 @@ public class EventHubNamespaceManager {
         for (String hostname : hostnames) {
             for (Map.Entry<String, List<String>> entry : entities.entrySet()) {
                 String entityName = entry.getKey();
-                String entityAddr = "amqp://" + hostname.toLowerCase(java.util.Locale.US) + "/" + namespace + "/" + entityName;
+                // Address and divert name both have to match what ArtemisConfigGenerator wrote
+                // into broker.xml. The diverts are exclusive, so where the two disagree the broker
+                // holds two of them over one route and delivers every message twice.
+                String entityAddr =
+                        ArtemisConfigGenerator.anycastEntityAddress(hostname, namespace, entityName);
 
                 jolokiaExec(http, baseUrl, auth, mbean,
                         "createAddress(java.lang.String,java.lang.String)",
@@ -283,8 +287,8 @@ public class EventHubNamespaceManager {
 
                 for (String cg : entry.getValue()) {
                     String cgAddr = entityAddr + "/" + cg;
-                    String divertName = (hostname + "-" + entityName + "-to-" + cg)
-                            .replaceAll("[^A-Za-z0-9_-]", "-");
+                    String divertName =
+                            ArtemisConfigGenerator.anycastDivertName(hostname, entityName, cg);
 
                     jolokiaExec(http, baseUrl, auth, mbean,
                             "createAddress(java.lang.String,java.lang.String)",

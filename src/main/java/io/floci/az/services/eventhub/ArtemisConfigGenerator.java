@@ -8,6 +8,7 @@ import jakarta.inject.Inject;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -166,8 +167,7 @@ public class ArtemisConfigGenerator {
     private void appendAnycastTopology(XmlBuilder addresses, XmlBuilder diverts,
                                         String hostname, String namespace, String entity,
                                         List<String> consumerGroups) {
-        // uamqp lowercases the hostname portion of AMQP URIs, so we must match that
-        String entityAddr = "amqp://" + hostname.toLowerCase(java.util.Locale.US) + "/" + namespace + "/" + entity;
+        String entityAddr = anycastEntityAddress(hostname, namespace, entity);
 
         // An explicit (non-durable) queue at the entity address lets the sender link attach.
         // The exclusive diverts below intercept all messages before they reach this queue,
@@ -182,7 +182,7 @@ public class ArtemisConfigGenerator {
 
         for (String cg : consumerGroups) {
             String cgAddr = entityAddr + "/" + cg;
-            String divertName = divertName(hostname, entity, "to", cg);
+            String divertName = anycastDivertName(hostname, entity, cg);
 
             addresses.startAttr("address", "name", cgAddr)
                        .start("anycast")
@@ -240,6 +240,24 @@ public class ArtemisConfigGenerator {
                        .end("divert");
             }
         }
+    }
+
+    /**
+     * The entity address the uamqp topology hangs off, and the name of the divert from it to one
+     * consumer group's queue.
+     *
+     * {@code EventHubNamespaceManager} rebuilds this same topology over Jolokia when it starts a
+     * namespace, so it calls these rather than spelling the strings a second time. Two spellings
+     * that drift apart do not fail — the diverts are exclusive, so the broker ends up holding two
+     * of them over one route and delivers every message twice. The host is lowercased because
+     * uamqp lowercases the host portion of the URIs it sends.
+     */
+    static String anycastEntityAddress(String hostname, String namespace, String entity) {
+        return "amqp://" + hostname.toLowerCase(Locale.US) + "/" + namespace + "/" + entity;
+    }
+
+    static String anycastDivertName(String hostname, String entity, String consumerGroup) {
+        return divertName(hostname, entity, "to", consumerGroup);
     }
 
     /**
