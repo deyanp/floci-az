@@ -104,7 +104,6 @@ public class EventHubNamespaceManager {
             return existing;
         }
         String containerName = containerName(namespaceName);
-        List<String> amqpHostnames = List.of("localhost", containerName);
 
         LOG.infov("Starting Artemis broker for Event Hubs namespace ''{0}'' (plain:{1}, TLS:{2})",
                 namespaceName, amqpHostPort == 0 ? "dynamic" : amqpHostPort,
@@ -171,13 +170,12 @@ public class EventHubNamespaceManager {
         management.start();
         managementResponders.put(namespaceName, management);
 
-        // Topology is pre-configured in broker.xml; Jolokia setup runs in background
-        // to handle any dynamic additions (e.g. consumer groups created after startup).
-        EndpointInfo jolokiaEndpoint = info.getEndpoint(JOLOKIA_PORT);
-        Thread.ofVirtual().name("jolokia-setup-" + namespaceName).start(() -> {
-            waitForJolokia(jolokiaEndpoint);
-            setupAmqpTopology(jolokiaEndpoint, namespaceName, entities, amqpHostnames);
-        });
+        // The topology is declared in broker.xml, written above and read as the broker starts.
+        // It used to be rebuilt over Jolokia as well, addressed per host; the AMQP layer now
+        // reduces every spelling to the entity path, so that second copy addressed nothing the
+        // broker would ever route to — and while the two copies still overlapped, any drift
+        // between how they named a divert installed a duplicate over the same route and delivered
+        // every message twice.
 
         NamespaceState state = new NamespaceState(
                 containerId, amqpEndpoint.port(), amqpsEndpoint.port(), tls.certPem(), false);
@@ -247,123 +245,6 @@ public class EventHubNamespaceManager {
 
     String containerName(String namespaceName) {
         return ContainerStorageHelper.dockerName(config, "artemis-" + namespaceName);
-    }
-
-    private void waitForJolokia(EndpointInfo endpoint) {
-        String url = "http://" + endpoint + "/console/jolokia";
-        String auth = Base64.getEncoder().encodeToString(
-                "artemis:artemis".getBytes(StandardCharsets.UTF_8));
-        long deadline = System.currentTimeMillis() + 120_000;
-        while (System.currentTimeMillis() < deadline) {
-            try {
-                HttpClient client = HttpClient.newHttpClient();
-                HttpRequest req = HttpRequest.newBuilder()
-                        .uri(URI.create(url))
-                        .timeout(Duration.ofSeconds(3))
-                        .header("Authorization", "Basic " + auth)
-                        .GET().build();
-                HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
-                if (resp.statusCode() == 200) {
-                    LOG.debugv("Artemis Jolokia ready at {0}", url);
-                    return;
-                }
-            } catch (Exception ignored) {
-            }
-            try {
-                Thread.sleep(500);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return;
-            }
-        }
-        LOG.warnv("Artemis Jolokia did not become ready at {0} within 120s; topology setup skipped", url);
-    }
-
-    /**
-     * Creates ANYCAST addresses, durable queues, and exclusive diverts via the Artemis Jolokia API.
-     * Sender targets entity address; exclusive diverts fan out to each consumer group's durable queue.
-     */
-    private void setupAmqpTopology(EndpointInfo jolokia, String namespace,
-                                    Map<String, ArtemisConfigGenerator.EntitySpec> entities, List<String> hostnames) {
-        String baseUrl = "http://" + jolokia + "/console/jolokia";
-        String auth = Base64.getEncoder().encodeToString(
-                "artemis:artemis".getBytes(StandardCharsets.UTF_8));
-        String mbean = "org.apache.activemq.artemis:broker=\\\"floci-az-eventhubs\\\"";
-        HttpClient http = HttpClient.newHttpClient();
-
-        for (String hostname : hostnames) {
-            for (Map.Entry<String, ArtemisConfigGenerator.EntitySpec> entry : entities.entrySet()) {
-                String entityName = entry.getKey();
-                // Address and divert name both have to match what ArtemisConfigGenerator wrote
-                // into broker.xml. The diverts are exclusive, so where the two disagree the broker
-                // holds two of them over one route and delivers every message twice.
-                String entityAddr =
-                        ArtemisConfigGenerator.anycastEntityAddress(hostname, namespace, entityName);
-
-                jolokiaExec(http, baseUrl, auth, mbean,
-                        "createAddress(java.lang.String,java.lang.String)",
-                        jsonArr(entityAddr, "ANYCAST"));
-
-                for (String cg : entry.getValue().consumerGroups()) {
-                    String cgAddr = entityAddr + "/" + cg;
-                    String divertName =
-                            ArtemisConfigGenerator.anycastDivertName(hostname, entityName, cg);
-
-                    jolokiaExec(http, baseUrl, auth, mbean,
-                            "createAddress(java.lang.String,java.lang.String)",
-                            jsonArr(cgAddr, "ANYCAST"));
-
-                    jolokiaExec(http, baseUrl, auth, mbean,
-                            "createQueue(java.lang.String,java.lang.String,java.lang.String,java.lang.String,boolean,int,boolean,boolean)",
-                            jsonArr(cgAddr, "ANYCAST", cgAddr, "", true, -1, false, false));
-
-                    jolokiaExec(http, baseUrl, auth, mbean,
-                            "createDivert(java.lang.String,java.lang.String,java.lang.String,java.lang.String,boolean,java.lang.String,java.lang.String)",
-                            jsonArr(divertName, divertName, entityAddr, cgAddr, true, "", ""));
-                }
-            }
-        }
-        LOG.infov("AMQP topology configured for namespace ''{0}'': {1} entities × {2} hostnames",
-                namespace, entities.size(), hostnames.size());
-    }
-
-    private void jolokiaExec(HttpClient http, String baseUrl, String auth,
-                              String mbean, String operation, String arguments) {
-        String body = "{\"type\":\"exec\",\"mbean\":\"" + mbean + "\","
-                + "\"operation\":\"" + operation + "\","
-                + "\"arguments\":" + arguments + "}";
-        try {
-            HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create(baseUrl))
-                    .timeout(Duration.ofSeconds(10))
-                    .header("Content-Type", "application/json")
-                    .header("Authorization", "Basic " + auth)
-                    .POST(HttpRequest.BodyPublishers.ofString(body))
-                    .build();
-            HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
-            if (resp.statusCode() != 200) {
-                String err = resp.body();
-                if (!err.contains("already exists") && !err.contains("already been deployed")) {
-                    LOG.debugv("Jolokia {0}: status={1}", operation.split("\\(")[0], resp.statusCode());
-                }
-            }
-        } catch (Exception e) {
-            LOG.debugv("Jolokia call failed ({0}): {1}", operation.split("\\(")[0], e.getMessage());
-        }
-    }
-
-    private static String jsonArr(Object... values) {
-        StringBuilder sb = new StringBuilder("[");
-        for (int i = 0; i < values.length; i++) {
-            if (i > 0) sb.append(",");
-            Object v = values[i];
-            if (v instanceof String s) {
-                sb.append("\"").append(s.replace("\\", "\\\\").replace("\"", "\\\"")).append("\"");
-            } else {
-                sb.append(v);
-            }
-        }
-        return sb.append("]").toString();
     }
 
     private void waitForPort(EndpointInfo endpoint, String label) {

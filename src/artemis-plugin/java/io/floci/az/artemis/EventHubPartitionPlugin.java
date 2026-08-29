@@ -55,6 +55,8 @@ public final class EventHubPartitionPlugin implements ActiveMQServerPlugin {
     private static final String OFFSET_PROPERTY = "floci_offset";
     private static final String SEQUENCE_NUMBER_PROPERTY = "floci_sequence_number";
     private static final String ENQUEUED_TIME_PROPERTY = "floci_enqueued_time";
+    /** Segment a producer address carries when the caller pinned a partition. */
+    private static final String PARTITIONS_SEGMENT = "/Partitions/";
     /** Plugin property: "eh1:4,eh2:2". */
     private static final String ENTITIES_PROPERTY = "entities";
 
@@ -102,14 +104,23 @@ public final class EventHubPartitionPlugin implements ActiveMQServerPlugin {
         if (address == null) {
             return;
         }
-        int partitionCount = partitionCountFor(address);
-        // Even a single-partition hub is stamped: its divert filters on this like any other.
-        int partition = partitionCount <= 1 ? 0 : choosePartition(message, address, partitionCount);
+        String hub = hubOf(address);
+        int partitionCount = partitionCounts.getOrDefault(hub, 1);
+        // A partition named in the address outranks everything: the caller pinned it, and the
+        // address is how the Java SDK says so. Otherwise pick by id, key or round-robin. Even a
+        // single-partition hub is stamped, because its divert filters on this like any other.
+        int pinnedByAddress = partitionInAddress(address);
+        int partition = pinnedByAddress >= 0 && pinnedByAddress < partitionCount ? pinnedByAddress
+                : partitionCount <= 1 ? 0
+                : choosePartition(message, hub, partitionCount);
         // Stamped as a string, and compared as one by the generated divert filters. That mirrors
         // the CBS divert, the one filter on an AMQP application property already known to work
         // here.
         message.putStringProperty(PARTITION_PROPERTY, Integer.toString(partition));
-        stampStreamPosition(message, address, partition);
+        // Keyed by the hub, not the address: a send pinned to {hub}/Partitions/{id} and one to
+        // {hub} land in the same partition queue, so they have to draw from the same counter or
+        // consumers would see the offset go backwards.
+        stampStreamPosition(message, hub, partition);
         // An AMQP message serves its properties from its encoded form, so a property set here is
         // invisible to the divert filters until the message is re-encoded.
         message.reencode();
@@ -131,9 +142,9 @@ public final class EventHubPartitionPlugin implements ActiveMQServerPlugin {
      * <p>Offsets and sequence numbers are the same counter here: Artemis keeps neither, and a
      * consumer only needs them to be monotonic per partition for a resume point to mean anything.
      */
-    private void stampStreamPosition(Message message, String address, int partition) {
+    private void stampStreamPosition(Message message, String hub, int partition) {
         long sequence = sequences
-                .computeIfAbsent(address + "#" + partition, k -> new AtomicLong())
+                .computeIfAbsent(hub + "#" + partition, k -> new AtomicLong())
                 .getAndIncrement();
         long enqueuedTime = System.currentTimeMillis();
 
@@ -147,7 +158,7 @@ public final class EventHubPartitionPlugin implements ActiveMQServerPlugin {
         message.putLongProperty(ENQUEUED_TIME_PROPERTY, enqueuedTime);
     }
 
-    private int choosePartition(Message message, String address, int partitionCount) {
+    private int choosePartition(Message message, String hub, int partitionCount) {
         Object pinned = addressingHint(message, PARTITION_ID_ANNOTATION);
         if (pinned != null) {
             try {
@@ -157,10 +168,10 @@ public final class EventHubPartitionPlugin implements ActiveMQServerPlugin {
                 }
                 LOG.log(System.Logger.Level.WARNING,
                         "Partition id " + id + " is outside 0.." + (partitionCount - 1)
-                        + " for " + address + "; falling back to the partition key");
+                        + " for " + hub + "; falling back to the partition key");
             } catch (NumberFormatException e) {
                 LOG.log(System.Logger.Level.WARNING,
-                        "Ignoring non-numeric partition id '" + pinned + "' on " + address);
+                        "Ignoring non-numeric partition id '" + pinned + "' on " + hub);
             }
         }
 
@@ -170,7 +181,7 @@ public final class EventHubPartitionPlugin implements ActiveMQServerPlugin {
         }
 
         return Math.floorMod(
-                roundRobin.computeIfAbsent(address, a -> new AtomicInteger()).getAndIncrement(),
+                roundRobin.computeIfAbsent(hub, a -> new AtomicInteger()).getAndIncrement(),
                 partitionCount);
     }
 
@@ -187,13 +198,27 @@ public final class EventHubPartitionPlugin implements ActiveMQServerPlugin {
         return annotation != null ? annotation : message.getObjectProperty(name);
     }
 
+    /** The partition a {@code {hub}/Partitions/{id}} address pins, or -1 if it pins none. */
+    private static int partitionInAddress(String address) {
+        int marker = address.lastIndexOf(PARTITIONS_SEGMENT);
+        if (marker < 0 || marker + PARTITIONS_SEGMENT.length() >= address.length()) {
+            return -1;
+        }
+        try {
+            return Integer.parseInt(address.substring(marker + PARTITIONS_SEGMENT.length()));
+        } catch (NumberFormatException e) {
+            return -1;
+        }
+    }
+
     /**
-     * The entity is the last segment of the address the sender used
-     * ({@code amqps://host/eh1} → {@code eh1}); hubs are configured by bare name.
+     * The hub an address names, whether or not it pins a partition.
+     *
+     * The AMQP layer has already reduced the address to a path, so the hub is the whole of it
+     * minus a trailing {@code /Partitions/{id}}.
      */
-    private int partitionCountFor(String address) {
-        int slash = address.lastIndexOf('/');
-        String entity = slash >= 0 ? address.substring(slash + 1) : address;
-        return partitionCounts.getOrDefault(entity, 1);
+    private static String hubOf(String address) {
+        int marker = address.lastIndexOf(PARTITIONS_SEGMENT);
+        return partitionInAddress(address) >= 0 ? address.substring(0, marker) : address;
     }
 }

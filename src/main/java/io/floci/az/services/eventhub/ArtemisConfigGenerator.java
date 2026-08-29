@@ -14,10 +14,14 @@ import java.util.Map;
 /**
  * Generates the Artemis broker.xml for an Event Hubs namespace.
  *
- * The broker.xml statically configures both:
- * - MULTICAST addresses for the rhea-promise (Node.js) SDK (path-only addressing)
- * - ANYCAST addresses, durable queues, and exclusive diverts for the uamqp (Python) SDK
- *   (full AMQP URI addressing: {@code amqp://hostname/namespace/entity})
+ * The broker.xml statically configures two address families, which stay apart deliberately:
+ * - the namespace-carrying one, addressed either by path ({@code {namespace}/{entity}}, MULTICAST,
+ *   one queue per consumer group, what rhea-promise publishes to) or by URI
+ *   ({@code amqp://{host}/{namespace}/{entity}}, ANYCAST, fanned out by exclusive diverts, what
+ *   uamqp sends). Both predate partitions, and neither is what an Azure SDK sends.
+ * - {@code {entity}} — the partitioned topology the Azure SDKs reach, declared once because
+ *   {@link org.apache.activemq.artemis.protocol.amqp.proton.AmqpEntityAddress} reduces every
+ *   scheme and host spelling of it to this one path.
  *
  * Pre-configuring topology in broker.xml avoids any dependency on the Jolokia management API,
  * which can take several minutes to start and would otherwise block readiness.
@@ -46,8 +50,7 @@ public class ArtemisConfigGenerator {
 
     /** Returns broker.xml for the given namespace and entities (used for dynamic namespace creation). */
     public String generate(String namespace, Map<String, EntitySpec> entities) {
-        String containerName = "floci-az-artemis-" + namespace;
-        List<String> hostnames = List.of("localhost", containerName);
+        List<String> hostnames = List.of("localhost", "floci-az-artemis-" + namespace);
 
         XmlBuilder addresses = new XmlBuilder();
         XmlBuilder diverts = new XmlBuilder();
@@ -64,13 +67,15 @@ public class ArtemisConfigGenerator {
             }
             partitionSpec.append(entityName).append(':').append(partitions);
 
+            // The namespace-carrying family, addressed by path (multicast) or by URI (anycast).
+            // Both predate partitions and neither is what an Azure SDK sends.
             appendMulticastAddress(addresses, namespace + "/" + entityName, cgs);
-
             for (String hostname : hostnames) {
                 appendAnycastTopology(addresses, diverts, hostname, namespace, entityName, cgs);
-                appendAzureAddressing(addresses, diverts, hostname, namespace, entityName, cgs);
-                appendPartitionTopology(addresses, diverts, hostname, entityName, cgs, partitions);
             }
+            // The family the Azure SDKs use, declared once: the AMQP layer reduces every scheme
+            // and host spelling of it to this one path.
+            appendPartitionTopology(addresses, diverts, entityName, cgs, partitions);
         }
         return buildBrokerXml(addresses, diverts, partitionSpec.toString());
     }
@@ -275,85 +280,92 @@ public class ArtemisConfigGenerator {
     }
 
     /**
-     * Appends the address form the Azure SDKs actually send to: {@code {scheme}://{host}/{entity}},
-     * where the namespace is the HOST and the path is only the hub — no namespace path segment.
+     * Appends the partitioned topology for one hub: the addresses a producer sends to and one
+     * durable queue per (consumer group, partition) for consumers to attach to.
      *
-     * Without this a send matches no configured address, {@code auto-create-addresses} creates one
-     * with no queues bound, and the message is discarded with no error anywhere. Both schemes are
-     * generated because SDKs put {@code amqps} in the address whatever the transport turns out to
-     * be, while some send {@code amqp}.
+     * Everything hangs off the bare entity path, once. That is what the AMQP layer reduces every
+     * address to ({@link org.apache.activemq.artemis.protocol.amqp.proton.AmqpEntityAddress}), so
+     * a Java producer naming {@code eh1} and a Rust consumer naming
+     * {@code amqps://ns.servicebus.windows.net/eh1} meet on the same queues. Generating a copy per
+     * host and scheme instead gave each spelling its own private hub — the sends were not lost, but
+     * only a client using the very same spelling could read them, while the management node
+     * reported one hub either way.
      *
-     * The diverts feed the same per-consumer-group queues the uamqp topology uses, so a consumer on
-     * either address form reads the same messages.
+     * Two kinds of sender address are declared:
+     * <ul>
+     *   <li>{@code {entity}} — the hub itself, where the partition is chosen by key or round-robin;
+     *   <li>{@code {entity}/Partitions/{id}} — a partition named outright, which is how the Java
+     *       SDK sends when the caller pins one. Without it those sends reach an auto-created
+     *       address with no queues and are discarded with no error anywhere.
+     * </ul>
+     *
+     * Each partition queue is fed by an exclusive divert filtered on the partition property that
+     * {@code EventHubPartitionPlugin} stamps as the message is routed — for the pinned address the
+     * plugin reads the partition out of the address itself, so the same filter serves both. A
+     * message therefore reaches exactly one partition per consumer group, which is the Event Hubs
+     * guarantee: every consumer group sees the whole stream, each event in one partition of it.
      */
-    private void appendAzureAddressing(XmlBuilder addresses, XmlBuilder diverts,
-                                       String hostname, String namespace, String entity,
-                                       List<String> consumerGroups) {
-        String host = hostname.toLowerCase(java.util.Locale.US);
-        for (String scheme : List.of("amqp", "amqps")) {
-            String entityAddr = scheme + "://" + host + "/" + entity;
-
-            // Non-durable queue so the sender link can attach; the exclusive diverts below take
-            // every message before it reaches this queue.
-            addresses.startAttr("address", "name", entityAddr)
-                       .start("anycast")
-                         .startAttr("queue", "name", entityAddr)
-                           .elem("durable", false)
-                         .end("queue")
-                       .end("anycast")
-                     .end("address");
-
-        }
-        // Routing out of this address belongs to appendPartitionTopology: every message goes to
-        // one partition queue per consumer group. Diverting here as well would deliver each
-        // message twice — once to a partition and once to the unpartitioned consumer-group queue.
-    }
-
-    /**
-     * Appends the partitioned consumer topology: one durable queue per (consumer group, partition)
-     * at the address SDKs attach their receiver to,
-     * {@code {scheme}://{host}/{entity}/ConsumerGroups/{group}/Partitions/{n}}.
-     *
-     * Each partition is fed by its own divert from the entity address, filtered on the partition
-     * property that {@code EventHubPartitionPlugin} stamps as the message is routed. A message
-     * therefore reaches exactly one partition per consumer group, which is the Event Hubs
-     * guarantee — every consumer group sees the whole stream, each event in one partition of it.
-     */
-    private void appendPartitionTopology(XmlBuilder addresses, XmlBuilder diverts,
-                                         String hostname, String entity,
+    private void appendPartitionTopology(XmlBuilder addresses, XmlBuilder diverts, String entity,
                                          List<String> consumerGroups, int partitionCount) {
-        String host = hostname.toLowerCase(java.util.Locale.US);
-        for (String scheme : List.of("amqp", "amqps")) {
-            String entityAddr = scheme + "://" + host + "/" + entity;
-            for (String cg : consumerGroups) {
-                for (int partition = 0; partition < partitionCount; partition++) {
-                    String partitionAddr = entityAddr + "/ConsumerGroups/" + cg + "/Partitions/" + partition;
-                    String divertName = (scheme + "-" + host + "-" + entity + "-" + cg + "-p" + partition)
-                            .replaceAll("[^A-Za-z0-9_-]", "-");
+        appendSenderAddress(addresses, entity);
+        for (int partition = 0; partition < partitionCount; partition++) {
+            appendSenderAddress(addresses, partitionSenderAddress(entity, partition));
+        }
 
-                    addresses.startAttr("address", "name", partitionAddr)
-                               .start("anycast")
-                                 .startAttr("queue", "name", partitionAddr)
-                                   .elem("durable", true)
-                                 .end("queue")
-                               .end("anycast")
-                             .end("address");
+        for (String cg : consumerGroups) {
+            for (int partition = 0; partition < partitionCount; partition++) {
+                String partitionAddr =
+                        entity + "/ConsumerGroups/" + cg + "/Partitions/" + partition;
 
-                    diverts.startAttr("divert", "name", divertName)
-                             .elem("address", entityAddr)
+                addresses.startAttr("address", "name", partitionAddr)
+                           .start("anycast")
+                             .startAttr("queue", "name", partitionAddr)
+                               .elem("durable", true)
+                             .end("queue")
+                           .end("anycast")
+                         .end("address");
+
+                // One divert per sender address: from the hub, and from the pinned-partition
+                // address for this partition. Both are exclusive, so a routed message does not
+                // also stay in the sender address's own queue — that queue exists only so the
+                // sender link has something to attach to, nothing consumes it, and a copy left
+                // there would never be drained. Each consumer group still gets its own copy,
+                // because it has its own divert and only the matching partition's filter passes.
+                for (String senderAddr :
+                        List.of(entity, partitionSenderAddress(entity, partition))) {
+                    diverts.startAttr("divert", "name",
+                                      divertName(senderAddr, cg, "p" + partition))
+                             .elem("address", senderAddr)
                              .elem("forwarding-address", partitionAddr)
                              .selfClose("filter", "string",
                                      PARTITION_PROPERTY + " = '" + partition + "'")
-                             // Exclusive, so a routed message does not also stay in the entity
-                             // address's own queue. That queue exists only so the sender link can
-                             // attach; nothing consumes it, so a copy left there is never drained.
-                             // Each consumer group still gets its own copy — one divert per
-                             // (group, partition), and only the matching partition's filter passes.
                              .elem("exclusive", true)
                            .end("divert");
                 }
             }
         }
+    }
+
+    /** The address the Java SDK sends to when the caller pins a partition. */
+    static String partitionSenderAddress(String entity, int partition) {
+        return entity + "/Partitions/" + partition;
+    }
+
+    /**
+     * Appends an address a producer attaches to.
+     *
+     * Its queue is non-durable and nothing consumes it: the exclusive partition diverts take every
+     * message before it arrives, and the queue exists only so the sender link has something to
+     * attach to.
+     */
+    private void appendSenderAddress(XmlBuilder addresses, String entityAddr) {
+        addresses.startAttr("address", "name", entityAddr)
+                   .start("anycast")
+                     .startAttr("queue", "name", entityAddr)
+                       .elem("durable", false)
+                     .end("queue")
+                   .end("anycast")
+                 .end("address");
     }
 
     /**
