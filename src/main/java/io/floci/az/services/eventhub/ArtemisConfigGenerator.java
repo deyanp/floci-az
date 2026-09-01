@@ -8,6 +8,7 @@ import jakarta.inject.Inject;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -51,6 +52,7 @@ public class ArtemisConfigGenerator {
 
             for (String hostname : hostnames) {
                 appendAnycastTopology(addresses, diverts, hostname, namespace, entityName, cgs);
+                appendAzureAddressing(addresses, diverts, hostname, namespace, entityName, cgs);
             }
         }
         return buildBrokerXml(addresses, diverts);
@@ -165,8 +167,7 @@ public class ArtemisConfigGenerator {
     private void appendAnycastTopology(XmlBuilder addresses, XmlBuilder diverts,
                                         String hostname, String namespace, String entity,
                                         List<String> consumerGroups) {
-        // uamqp lowercases the hostname portion of AMQP URIs, so we must match that
-        String entityAddr = "amqp://" + hostname.toLowerCase(java.util.Locale.US) + "/" + namespace + "/" + entity;
+        String entityAddr = anycastEntityAddress(hostname, namespace, entity);
 
         // An explicit (non-durable) queue at the entity address lets the sender link attach.
         // The exclusive diverts below intercept all messages before they reach this queue,
@@ -181,8 +182,7 @@ public class ArtemisConfigGenerator {
 
         for (String cg : consumerGroups) {
             String cgAddr = entityAddr + "/" + cg;
-            String divertName = (hostname + "-" + entity + "-to-" + cg)
-                    .replaceAll("[^A-Za-z0-9_-]", "-");
+            String divertName = anycastDivertName(hostname, entity, cg);
 
             addresses.startAttr("address", "name", cgAddr)
                        .start("anycast")
@@ -198,6 +198,86 @@ public class ArtemisConfigGenerator {
                      .elem("exclusive", true)
                    .end("divert");
         }
+    }
+
+    /**
+     * Appends the address form the Azure SDKs actually send to: {@code {scheme}://{host}/{entity}},
+     * where the namespace is the HOST and the path is only the hub — no namespace path segment.
+     *
+     * Without this a send matches no configured address, {@code auto-create-addresses} creates one
+     * with no queues bound, and the message is discarded with no error anywhere. Both schemes are
+     * generated because SDKs put {@code amqps} in the address whatever the transport turns out to
+     * be, while some send {@code amqp}.
+     *
+     * The diverts feed the same per-consumer-group queues the uamqp topology uses, so a consumer on
+     * either address form reads the same messages.
+     */
+    private void appendAzureAddressing(XmlBuilder addresses, XmlBuilder diverts,
+                                       String hostname, String namespace, String entity,
+                                       List<String> consumerGroups) {
+        String host = hostname.toLowerCase(java.util.Locale.US);
+        for (String scheme : List.of("amqp", "amqps")) {
+            String entityAddr = scheme + "://" + host + "/" + entity;
+
+            // Non-durable queue so the sender link can attach; the exclusive diverts below take
+            // every message before it reaches this queue.
+            addresses.startAttr("address", "name", entityAddr)
+                       .start("anycast")
+                         .startAttr("queue", "name", entityAddr)
+                           .elem("durable", false)
+                         .end("queue")
+                       .end("anycast")
+                     .end("address");
+
+            for (String cg : consumerGroups) {
+                String targetCgAddr = "amqp://" + host + "/" + namespace + "/" + entity + "/" + cg;
+                String divertName = divertName(scheme, host, entity, "to", cg);
+
+                diverts.startAttr("divert", "name", divertName)
+                         .elem("address", entityAddr)
+                         .elem("forwarding-address", targetCgAddr)
+                         .elem("exclusive", true)
+                       .end("divert");
+            }
+        }
+    }
+
+    /**
+     * The entity address the uamqp topology hangs off, and the name of the divert from it to one
+     * consumer group's queue.
+     *
+     * {@code EventHubNamespaceManager} rebuilds this same topology over Jolokia when it starts a
+     * namespace, so it calls these rather than spelling the strings a second time. Two spellings
+     * that drift apart do not fail — the diverts are exclusive, so the broker ends up holding two
+     * of them over one route and delivers every message twice. The host is lowercased because
+     * uamqp lowercases the host portion of the URIs it sends.
+     */
+    static String anycastEntityAddress(String hostname, String namespace, String entity) {
+        return "amqp://" + hostname.toLowerCase(Locale.US) + "/" + namespace + "/" + entity;
+    }
+
+    static String anycastDivertName(String hostname, String entity, String consumerGroup) {
+        return divertName(hostname, entity, "to", consumerGroup);
+    }
+
+    /**
+     * A divert name that is readable and cannot collide with another one.
+     *
+     * Artemis skips a duplicate binding without saying so, which would leave one consumer group's
+     * queue receiving nothing while every send still succeeded. Two diverts reducing to the same
+     * name is easy to arrange: Azure allows dots in a hub or consumer-group name and Artemis names
+     * should not carry them, so {@code eh.1} and {@code eh-1} sanitize alike; and the separator
+     * between the parts is legal inside a part, so entity {@code a-to-b} with group {@code c}
+     * joins to the same string as entity {@code a} with group {@code b-to-c}.
+     *
+     * The suffix is what makes the name unique — a hash over the exact parts, built from
+     * {@link String#hashCode()}, whose value the language specification pins so the generated
+     * broker.xml is the same on every run and every JVM. The readable part is kept in front of it
+     * so the file can still be read.
+     */
+    private static String divertName(String... parts) {
+        String readable = String.join("-", parts).replaceAll("[^A-Za-z0-9_-]", "-");
+        return readable + "-" + Integer.toHexString(List.of(parts).hashCode());
     }
 
     private static List<String> parseConsumerGroups(String raw) {
