@@ -14,6 +14,8 @@ public class ServiceBusServiceTest {
     private static final String BASE = "/devstoreaccount1-servicebus";
     private static final String SB_NS =
             "http://schemas.microsoft.com/netservices/2010/10/servicebus/connect";
+    private static final String SB_COUNT_NS =
+            "http://schemas.microsoft.com/netservices/2011/06/servicebus";
 
     @Test
     void testExistingPathRouting() {
@@ -296,6 +298,30 @@ public class ServiceBusServiceTest {
                 .then().statusCode(201)
                 .body(containsString("<LockDuration>PT1M</LockDuration>"))
                 .body(containsString("<MaxDeliveryCount>10</MaxDeliveryCount>"));
+    }
+
+    @Test
+    void queueAndSubscriptionDescriptionsExposeRuntimeCountShape() {
+        given().body(entry("<QueueDescription xmlns=\"" + SB_NS + "\"/>"))
+                .when().put(BASE + "/runtime-count-queue")
+                .then()
+                .statusCode(201)
+                .body(containsString("<MessageCount>0</MessageCount>"))
+                .body(containsString("<CountDetails xmlns:sb=\"" + SB_COUNT_NS + "\">"))
+                .body(containsString("<sb:ActiveMessageCount>0</sb:ActiveMessageCount>"))
+                .body(containsString("<sb:DeadLetterMessageCount>0</sb:DeadLetterMessageCount>"));
+
+        given().body(entry("<TopicDescription xmlns=\"" + SB_NS + "\"/>"))
+                .when().put(BASE + "/runtime-count-topic")
+                .then().statusCode(201);
+        given().body(entry("<SubscriptionDescription xmlns=\"" + SB_NS + "\"/>"))
+                .when().put(BASE + "/runtime-count-topic/subscriptions/runtime-count-sub")
+                .then()
+                .statusCode(201)
+                .body(containsString("<MessageCount>0</MessageCount>"))
+                .body(containsString("<CountDetails xmlns:sb=\"" + SB_COUNT_NS + "\">"))
+                .body(containsString("<sb:ActiveMessageCount>0</sb:ActiveMessageCount>"))
+                .body(containsString("<sb:DeadLetterMessageCount>0</sb:DeadLetterMessageCount>"));
     }
 
     @Test
