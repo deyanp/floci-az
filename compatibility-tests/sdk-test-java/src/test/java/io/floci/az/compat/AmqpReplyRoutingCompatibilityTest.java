@@ -29,6 +29,7 @@ import java.util.UUID;
 import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -54,6 +55,8 @@ class AmqpReplyRoutingCompatibilityTest {
     /** How long the replies, and any stray reply, get to arrive after the last request. */
     private static final long REPLY_WINDOW_MS = 3_000;
     private static final long EXCHANGE_TIMEOUT_MS = 60_000;
+    /** How long the reactor thread gets to end once it has been told to stop. */
+    private static final long STOP_TIMEOUT_MS = 10_000;
 
     @Test
     @DisplayName("Event Hubs: each connection receives only the reply to its own put-token")
@@ -93,6 +96,25 @@ class AmqpReplyRoutingCompatibilityTest {
                         Map.of("operation", "com.microsoft:peek-message"),
                         Map.of("from-sequence-number", 0L, "message-count", 1)),
                 "statusCode", 204);
+    }
+
+    /**
+     * Lock renewal is answered inside the broker too, on a path of its own. A lock token that
+     * matches no lock gets the error reply, 410 with {@code com.microsoft:message-lock-lost},
+     * which is a reply like any other and needs no message to be locked first.
+     */
+    @Test
+    @DisplayName("Service Bus: each connection receives only the reply to its own lock renewal")
+    void serviceBusLockRenewal() throws Exception {
+        Broker broker = serviceBusBroker();
+        String queue = "replies-" + UUID.randomUUID().toString().substring(0, 8);
+        EmulatorConfig.ensureServiceBusQueue(queue, false);
+
+        assertEachConnectionGetsOnlyItsOwnReply(broker, queue + "/$management",
+                requestId -> request(requestId,
+                        Map.of("operation", "com.microsoft:renew-lock"),
+                        Map.of("lock-tokens", new UUID[]{UUID.randomUUID()})),
+                "statusCode", 410);
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
@@ -152,9 +174,15 @@ class AmqpReplyRoutingCompatibilityTest {
         Thread thread = new Thread(reactor::run, "reply-routing-test");
         thread.setDaemon(true);
         thread.start();
-        thread.join(EXCHANGE_TIMEOUT_MS + 5_000);
-        reactor.free();
+        try {
+            // The exchange stops the reactor itself once the reply window has passed, or at its
+            // own timeout, so this join normally returns long before its limit.
+            thread.join(EXCHANGE_TIMEOUT_MS + STOP_TIMEOUT_MS);
+        } finally {
+            stop(reactor, thread);
+        }
 
+        // The reactor thread has ended, so nothing changes the exchange's state any more.
         assertNull(exchange.failure, exchange.failure);
         assertTrue(exchange.sent == CONNECTIONS,
                 "only " + exchange.sent + " of " + CONNECTIONS + " requests were sent");
@@ -168,6 +196,24 @@ class AmqpReplyRoutingCompatibilityTest {
             assertEquals(List.of(exchange.requestIds.get(i)), correlationIds,
                     "connection " + i + " must receive the reply to its own request and no other");
         }
+    }
+
+    /**
+     * Stops the reactor, waits for its thread to end, and only then frees the reactor.
+     *
+     * <p>In proton-j, {@link Reactor#stop()} only sets a flag, which the reactor reads when no
+     * event is waiting. {@link Reactor#wakeup()} writes to the reactor's wake-up pipe, which is
+     * safe from any thread, and ends a blocked select, so the flag is read at once rather than
+     * when the select times out. A reactor whose thread still runs is not freed: that thread may
+     * still use the connections.
+     */
+    private static void stop(Reactor reactor, Thread thread) throws InterruptedException {
+        reactor.stop();
+        reactor.wakeup();
+        thread.join(STOP_TIMEOUT_MS);
+        assertFalse(thread.isAlive(),
+                "the AMQP reactor thread did not stop within " + STOP_TIMEOUT_MS + " ms");
+        reactor.free();
     }
 
     /**
