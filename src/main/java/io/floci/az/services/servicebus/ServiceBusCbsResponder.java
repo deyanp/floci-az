@@ -33,6 +33,10 @@ import java.util.Map;
  * put-token. Some SDK stacks accept 200; others reject anything but 202 (the Rust
  * {@code fe2o3-amqp-cbs} hard-codes it), so the specified code is the interoperable one.
  *
+ * The reply reaches only the connection that sent the request, as in Azure: the broker stamps
+ * each request with the id of its connection, a receiver on {@code $cbs} gets only the messages
+ * stamped with its own connection's id, and the reply carries the stamp back.
+ *
  * Uses proton-j directly since it is the same low-level AMQP library the SDK uses internally.
  */
 public class ServiceBusCbsResponder {
@@ -41,6 +45,13 @@ public class ServiceBusCbsResponder {
     private static final String CBS_ADDRESS = "$cbs";
     private static final String CBS_INTERCEPT_ADDRESS = "$cbs-intercept";
     private static final long RECONNECT_BACKOFF_MS = 2_000;
+
+    /**
+     * Application property that carries the id of the connection that sent a request. The
+     * broker's AMQP layer ({@code AmqpReplyRouting}) sets it and filters on it. That class is built
+     * into the patched AMQP protocol jar, so the name is duplicated here.
+     */
+    static final String CONNECTION_ID_PROPERTY = "floci_connection_id";
 
     private final String host;
     private final int port;
@@ -114,6 +125,18 @@ public class ServiceBusCbsResponder {
         }
     }
 
+    /**
+     * Copies the id of the requesting connection onto the application properties of a reply. A
+     * reply without it reaches no receiver.
+     */
+    public static void copyConnectionId(Message request, Map<String, Object> replyProperties) {
+        ApplicationProperties props = request.getApplicationProperties();
+        Object connectionId = props == null ? null : props.getValue().get(CONNECTION_ID_PROPERTY);
+        if (connectionId != null) {
+            replyProperties.put(CONNECTION_ID_PROPERTY, connectionId);
+        }
+    }
+
     private class CbsHandler extends BaseHandler {
 
         private Sender responseSender;
@@ -159,19 +182,20 @@ public class ServiceBusCbsResponder {
             Object messageId = request.getMessageId();
             LOG.debugv("CBS put-token received, messageId={0}", messageId);
 
-            sendOkResponse(messageId);
+            sendOkResponse(request);
 
             delivery.disposition(Accepted.getInstance());
             delivery.settle();
             receiver.flow(1);
         }
 
-        private void sendOkResponse(Object correlationId) {
+        private void sendOkResponse(Message request) {
             Message response = Message.Factory.create();
-            response.setCorrelationId(correlationId);
+            response.setCorrelationId(request.getMessageId());
             Map<String, Object> props = new HashMap<>();
             props.put("status-code", 202);
             props.put("status-description", "Accepted");
+            copyConnectionId(request, props);
             response.setApplicationProperties(new ApplicationProperties(props));
 
             byte[] encoded = new byte[512];

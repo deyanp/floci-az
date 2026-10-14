@@ -2,6 +2,7 @@ package org.apache.activemq.artemis.protocol.amqp.proton;
 
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -86,13 +87,16 @@ public final class ServiceBusLockRenewalSupport {
       }
       Properties replyProperties = new Properties();
       replyProperties.setCorrelationId(request.getProperties().getMessageId());
+      Map<String, Object> applicationProperties = new HashMap<>(status == 200
+         ? Map.of("statusCode", status, "statusDescription", "OK")
+         : Map.of("statusCode", status, "statusDescription", "Lock renewal failed",
+            "errorCondition", org.apache.qpid.proton.amqp.Symbol.valueOf(condition)));
+      // The reply goes to every receiver on the management address; the stamp keeps it to the
+      // connection that asked.
+      AmqpReplyRouting.copyStamp(request, applicationProperties);
       var server = connection.getProtocolManager().getServer();
       var reply = AMQPStandardMessage.createMessage(server.getStorageManager().generateID(), 0,
-         null, null, replyProperties, null, null,
-         status == 200 ? Map.of("statusCode", status, "statusDescription", "OK")
-            : Map.of("statusCode", status, "statusDescription", "Lock renewal failed",
-               "errorCondition", org.apache.qpid.proton.amqp.Symbol.valueOf(condition)),
-         null, new AmqpValue(response));
+         null, null, replyProperties, null, null, applicationProperties, null, new AmqpValue(response));
       reply.setAddress(address);
       server.getPostOffice().route(reply, false);
       delivery.disposition(Accepted.getInstance());

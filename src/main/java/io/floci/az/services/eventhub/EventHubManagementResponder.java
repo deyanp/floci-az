@@ -1,5 +1,6 @@
 package io.floci.az.services.eventhub;
 
+import io.floci.az.services.servicebus.ServiceBusCbsResponder;
 import org.apache.qpid.proton.Proton;
 import org.apache.qpid.proton.amqp.messaging.Accepted;
 import org.apache.qpid.proton.amqp.messaging.AmqpValue;
@@ -32,7 +33,8 @@ import java.util.Map;
  *
  * <p>Built the same way as the CBS responder: the broker.xml divert routes requests to an intercept
  * queue this attaches to, and the reply goes back on {@code $management}, which is both the address
- * SDKs send to and the one they receive on.
+ * SDKs send to and the one they receive on. Like the CBS reply, it carries the id of the requesting
+ * connection, so that only that connection receives it.
  */
 public class EventHubManagementResponder {
 
@@ -164,18 +166,18 @@ public class EventHubManagementResponder {
             String name = string(props.get("name"));
             LOG.debugv("Management request received: type={0}, name={1}", entityType, name);
 
-            sendResponse(request.getMessageId(), entityType, name);
+            sendResponse(request, entityType, name);
 
             delivery.disposition(Accepted.getInstance());
             delivery.settle();
             receiver.flow(1);
         }
 
-        private void sendResponse(Object correlationId, String entityType, String name) {
+        private void sendResponse(Message request, String entityType, String name) {
             ArtemisConfigGenerator.EntitySpec spec = name == null ? null : entities.get(name);
 
             Message response = Message.Factory.create();
-            response.setCorrelationId(correlationId);
+            response.setCorrelationId(request.getMessageId());
             Map<String, Object> responseProps = new HashMap<>();
 
             if (!EVENTHUB_ENTITY_TYPE.equals(entityType)) {
@@ -193,6 +195,7 @@ public class EventHubManagementResponder {
                 responseProps.put("status-description", "OK");
                 response.setBody(new AmqpValue(hubProperties(name, spec)));
             }
+            ServiceBusCbsResponder.copyConnectionId(request, responseProps);
 
             response.setApplicationProperties(new ApplicationProperties(responseProps));
 
