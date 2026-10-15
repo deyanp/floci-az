@@ -50,9 +50,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * connection must then hold exactly one reply: the one to its own request.
  *
  * <p>The broker routes each reply by a property of its own, which Azure never sends. Each reply
- * must reach the client without it, so that the client sees the reply as Azure sends it. On Event
- * Hubs that shape is pinned exactly: a status code and a status description, correlated to the
- * request, with no other application property and no message annotation.
+ * must reach the client without it, so that the client sees the reply as Azure sends it. That
+ * shape is pinned exactly on both services: the status properties Azure sends on the node,
+ * correlated to the request, with no other application property and no message annotation.
  *
  * <p>An operation floci-az does not implement gets a reply too: 501 (Not Implemented), on the
  * requesting connection only. The request itself never comes back to a client.
@@ -68,14 +68,21 @@ class AmqpReplyRoutingCompatibilityTest {
     private static final long STOP_TIMEOUT_MS = 10_000;
     /** The prefix of the properties the broker keeps for itself. Azure sends none of them. */
     private static final String INTERNAL_PROPERTY_PREFIX = "floci_";
-    /** The application properties of an Event Hubs CBS or management reply, as Azure sends it. */
-    private static final Set<String> EVENT_HUBS_REPLY_PROPERTIES = Set.of("status-code", "status-description");
+    /** {@code $cbs} and the Event Hubs {@code $management}: the AMQP management specification's names. */
+    private static final ReplyShape AMQP_MANAGEMENT_REPLY =
+            new ReplyShape("status-code", Set.of("status-code", "status-description"));
+    /** A Service Bus entity management node. */
+    private static final ReplyShape ENTITY_MANAGEMENT_REPLY =
+            new ReplyShape("statusCode", Set.of("statusCode", "statusDescription"));
+    /** A Service Bus entity management node, for an operation that failed with an error condition. */
+    private static final ReplyShape ENTITY_MANAGEMENT_ERROR =
+            new ReplyShape("statusCode", Set.of("statusCode", "statusDescription", "errorCondition"));
 
     @Test
     @DisplayName("Event Hubs: each connection receives only the reply to its own put-token")
     void eventHubPutToken() throws Exception {
         assertEachConnectionGetsOnlyItsOwnReply(eventHubBroker(), "$cbs",
-                AmqpReplyRoutingCompatibilityTest::putToken, "status-code", 202);
+                AmqpReplyRoutingCompatibilityTest::putToken, AMQP_MANAGEMENT_REPLY, 202);
     }
 
     @Test
@@ -86,14 +93,14 @@ class AmqpReplyRoutingCompatibilityTest {
                         "operation", "READ",
                         "type", "com.microsoft:eventhub",
                         "name", EmulatorConfig.EVENTHUB_NAME), null),
-                "status-code", 200);
+                AMQP_MANAGEMENT_REPLY, 200);
     }
 
     @Test
     @DisplayName("Service Bus: each connection receives only the reply to its own put-token")
     void serviceBusPutToken() throws Exception {
         assertEachConnectionGetsOnlyItsOwnReply(serviceBusBroker(), "$cbs",
-                AmqpReplyRoutingCompatibilityTest::putToken, "status-code", 202);
+                AmqpReplyRoutingCompatibilityTest::putToken, AMQP_MANAGEMENT_REPLY, 202);
     }
 
     /** Peek is answered inside the broker rather than by a responder, so it gets a case of its own. */
@@ -108,7 +115,7 @@ class AmqpReplyRoutingCompatibilityTest {
                 requestId -> request(requestId,
                         Map.of("operation", "com.microsoft:peek-message"),
                         Map.of("from-sequence-number", 0L, "message-count", 1)),
-                "statusCode", 204);
+                ENTITY_MANAGEMENT_REPLY, 204);
     }
 
     /**
@@ -127,7 +134,7 @@ class AmqpReplyRoutingCompatibilityTest {
                 requestId -> request(requestId,
                         Map.of("operation", "com.microsoft:renew-lock"),
                         Map.of("lock-tokens", new UUID[]{UUID.randomUUID()})),
-                "statusCode", 410);
+                ENTITY_MANAGEMENT_ERROR, 410);
     }
 
     @Test
@@ -138,7 +145,7 @@ class AmqpReplyRoutingCompatibilityTest {
                         "operation", "delete-token",
                         "type", "servicebus.windows.net:sastoken",
                         "name", "amqp://" + EmulatorConfig.EVENTHUB_HOST + "/" + EmulatorConfig.EVENTHUB_NAME), null),
-                "status-code", 501);
+                AMQP_MANAGEMENT_REPLY, 501);
     }
 
     @Test
@@ -149,7 +156,18 @@ class AmqpReplyRoutingCompatibilityTest {
                         "operation", "UPDATE",
                         "type", "com.microsoft:eventhub",
                         "name", EmulatorConfig.EVENTHUB_NAME), null),
-                "status-code", 501);
+                AMQP_MANAGEMENT_REPLY, 501);
+    }
+
+    @Test
+    @DisplayName("Service Bus: each connection receives only the 501 to its own CBS operation other than put-token")
+    void serviceBusUnimplementedCbsOperation() throws Exception {
+        assertEachConnectionGetsOnlyItsOwnReply(serviceBusBroker(), "$cbs",
+                requestId -> request(requestId, Map.of(
+                        "operation", "delete-token",
+                        "type", "servicebus.windows.net:sastoken",
+                        "name", "amqp://" + EmulatorConfig.SERVICEBUS_HOST + "/replies"), null),
+                AMQP_MANAGEMENT_REPLY, 501);
     }
 
     /** Scheduling a message is a management operation floci-az does not implement. */
@@ -164,23 +182,26 @@ class AmqpReplyRoutingCompatibilityTest {
                 requestId -> request(requestId,
                         Map.of("operation", "com.microsoft:schedule-message"),
                         Map.of("messages", List.of())),
-                "statusCode", 501);
+                ENTITY_MANAGEMENT_REPLY, 501);
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
+    /** Where to reach a broker, and the TLS settings for it if it is reached over TLS. */
+    private record Broker(String host, int port, SslDomain tls) {}
+
     /**
-     * Where to reach a broker, the TLS settings for it if it is reached over TLS, and whether its
-     * replies are checked for Azure's exact shape (Event Hubs).
+     * A reply as Azure sends it on a node: its application properties, and the one of them that
+     * holds the status. Azure sends no other application property and no message annotation.
      */
-    private record Broker(String host, int port, SslDomain tls, boolean exactReplyShape) {}
+    private record ReplyShape(String statusProperty, Set<String> properties) {}
 
     private static Broker eventHubBroker() throws Exception {
         EmulatorConfig.assumeEmulatorRunning();
         EmulatorConfig.ensureEventHubNamespace();
         Assumptions.assumeTrue(!EmulatorConfig.eventHubMocked,
                 "Event Hubs is in mocked mode (no Artemis broker), AMQP tests skipped");
-        return new Broker(EmulatorConfig.EVENTHUB_HOST, EmulatorConfig.EVENTHUB_AMQP_PORT, null, true);
+        return new Broker(EmulatorConfig.EVENTHUB_HOST, EmulatorConfig.EVENTHUB_AMQP_PORT, null);
     }
 
     /**
@@ -197,7 +218,7 @@ class AmqpReplyRoutingCompatibilityTest {
         tls.init(SslDomain.Mode.CLIENT);
         tls.setSslContext(SSLContext.getDefault());
         tls.setPeerAuthentication(SslDomain.VerifyMode.VERIFY_PEER);
-        return new Broker(EmulatorConfig.SERVICEBUS_HOST, EmulatorConfig.serviceBusAmqpsPort, tls, false);
+        return new Broker(EmulatorConfig.SERVICEBUS_HOST, EmulatorConfig.serviceBusAmqpsPort, tls);
     }
 
     /** A put-token request as the Azure SDKs send it. The responder reads none of the values. */
@@ -221,7 +242,7 @@ class AmqpReplyRoutingCompatibilityTest {
 
     private static void assertEachConnectionGetsOnlyItsOwnReply(
             Broker broker, String address, Function<String, Message> request,
-            String statusProperty, int expectedStatus) throws Exception {
+            ReplyShape shape, int expectedStatus) throws Exception {
         Exchange exchange = new Exchange(broker, address, request);
         Reactor reactor = Proton.reactor(exchange);
         Thread thread = new Thread(reactor::run, "reply-routing-test");
@@ -246,21 +267,19 @@ class AmqpReplyRoutingCompatibilityTest {
                         ? Map.of() : reply.getApplicationProperties().getValue();
                 assertFalse(properties.containsKey("operation"),
                         "connection " + i + " received a request, not a reply: " + properties);
-                Object status = properties.get(statusProperty);
+                Object status = properties.get(shape.statusProperty());
                 assertEquals(expectedStatus, status instanceof Number number ? number.intValue() : -1,
                         "connection " + i + " received an unexpected reply: " + properties);
                 List<?> internal = properties.keySet().stream()
                         .filter(key -> key.toString().startsWith(INTERNAL_PROPERTY_PREFIX)).toList();
                 assertTrue(internal.isEmpty(), "connection " + i + " received a reply with " + internal
                         + ", which Azure never sends: " + properties);
-                if (broker.exactReplyShape()) {
-                    assertEquals(EVENT_HUBS_REPLY_PROPERTIES, properties.keySet(),
-                            "connection " + i + " received a reply with properties Azure does not send: " + properties);
-                    Map<?, ?> annotations = reply.getMessageAnnotations() == null
-                            ? Map.of() : reply.getMessageAnnotations().getValue();
-                    assertTrue(annotations.isEmpty(), "connection " + i
-                            + " received a reply with message annotations Azure does not send: " + annotations);
-                }
+                assertEquals(shape.properties(), properties.keySet(),
+                        "connection " + i + " received a reply with properties Azure does not send: " + properties);
+                Map<?, ?> annotations = reply.getMessageAnnotations() == null
+                        ? Map.of() : reply.getMessageAnnotations().getValue();
+                assertTrue(annotations.isEmpty(), "connection " + i
+                        + " received a reply with message annotations Azure does not send: " + annotations);
                 correlationIds.add(reply.getCorrelationId());
             }
             assertEquals(List.of(exchange.requestIds.get(i)), correlationIds,
