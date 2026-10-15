@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
 
@@ -49,7 +50,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * connection must then hold exactly one reply: the one to its own request.
  *
  * <p>The broker routes each reply by a property of its own, which Azure never sends. Each reply
- * must reach the client without it, so that the client sees the reply as Azure sends it.
+ * must reach the client without it, so that the client sees the reply as Azure sends it. On Event
+ * Hubs that shape is pinned exactly: a status code and a status description, correlated to the
+ * request, with no other application property and no message annotation.
  *
  * <p>An operation floci-az does not implement gets a reply too: 501 (Not Implemented), on the
  * requesting connection only. The request itself never comes back to a client.
@@ -63,8 +66,10 @@ class AmqpReplyRoutingCompatibilityTest {
     private static final long EXCHANGE_TIMEOUT_MS = 60_000;
     /** How long the reactor thread gets to end once it has been told to stop. */
     private static final long STOP_TIMEOUT_MS = 10_000;
-    /** The application property the broker routes a reply by. Azure sends no such property. */
-    private static final String ROUTING_PROPERTY = "floci_connection_id";
+    /** The prefix of the properties the broker keeps for itself. Azure sends none of them. */
+    private static final String INTERNAL_PROPERTY_PREFIX = "floci_";
+    /** The application properties of an Event Hubs CBS or management reply, as Azure sends it. */
+    private static final Set<String> EVENT_HUBS_REPLY_PROPERTIES = Set.of("status-code", "status-description");
 
     @Test
     @DisplayName("Event Hubs: each connection receives only the reply to its own put-token")
@@ -164,15 +169,18 @@ class AmqpReplyRoutingCompatibilityTest {
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
-    /** Where to reach a broker, and the TLS settings for it if it is reached over TLS. */
-    private record Broker(String host, int port, SslDomain tls) {}
+    /**
+     * Where to reach a broker, the TLS settings for it if it is reached over TLS, and whether its
+     * replies are checked for Azure's exact shape (Event Hubs).
+     */
+    private record Broker(String host, int port, SslDomain tls, boolean exactReplyShape) {}
 
     private static Broker eventHubBroker() throws Exception {
         EmulatorConfig.assumeEmulatorRunning();
         EmulatorConfig.ensureEventHubNamespace();
         Assumptions.assumeTrue(!EmulatorConfig.eventHubMocked,
                 "Event Hubs is in mocked mode (no Artemis broker), AMQP tests skipped");
-        return new Broker(EmulatorConfig.EVENTHUB_HOST, EmulatorConfig.EVENTHUB_AMQP_PORT, null);
+        return new Broker(EmulatorConfig.EVENTHUB_HOST, EmulatorConfig.EVENTHUB_AMQP_PORT, null, true);
     }
 
     /**
@@ -189,7 +197,7 @@ class AmqpReplyRoutingCompatibilityTest {
         tls.init(SslDomain.Mode.CLIENT);
         tls.setSslContext(SSLContext.getDefault());
         tls.setPeerAuthentication(SslDomain.VerifyMode.VERIFY_PEER);
-        return new Broker(EmulatorConfig.SERVICEBUS_HOST, EmulatorConfig.serviceBusAmqpsPort, tls);
+        return new Broker(EmulatorConfig.SERVICEBUS_HOST, EmulatorConfig.serviceBusAmqpsPort, tls, false);
     }
 
     /** A put-token request as the Azure SDKs send it. The responder reads none of the values. */
@@ -241,9 +249,18 @@ class AmqpReplyRoutingCompatibilityTest {
                 Object status = properties.get(statusProperty);
                 assertEquals(expectedStatus, status instanceof Number number ? number.intValue() : -1,
                         "connection " + i + " received an unexpected reply: " + properties);
-                assertFalse(properties.containsKey(ROUTING_PROPERTY),
-                        "connection " + i + " received a reply with " + ROUTING_PROPERTY
-                                + ", which Azure never sends: " + properties);
+                List<?> internal = properties.keySet().stream()
+                        .filter(key -> key.toString().startsWith(INTERNAL_PROPERTY_PREFIX)).toList();
+                assertTrue(internal.isEmpty(), "connection " + i + " received a reply with " + internal
+                        + ", which Azure never sends: " + properties);
+                if (broker.exactReplyShape()) {
+                    assertEquals(EVENT_HUBS_REPLY_PROPERTIES, properties.keySet(),
+                            "connection " + i + " received a reply with properties Azure does not send: " + properties);
+                    Map<?, ?> annotations = reply.getMessageAnnotations() == null
+                            ? Map.of() : reply.getMessageAnnotations().getValue();
+                    assertTrue(annotations.isEmpty(), "connection " + i
+                            + " received a reply with message annotations Azure does not send: " + annotations);
+                }
                 correlationIds.add(reply.getCorrelationId());
             }
             assertEquals(List.of(exchange.requestIds.get(i)), correlationIds,
