@@ -1,6 +1,7 @@
 package io.floci.az.services.servicebus;
 
 import io.floci.az.config.EmulatorConfig;
+import io.floci.az.core.AmqpManagementReply;
 import io.floci.az.core.XmlBuilder;
 import io.floci.az.services.eventhub.ArtemisTlsGenerator;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -58,7 +59,7 @@ public class ServiceBusConfigGenerator {
                           "io.floci.az.artemis.ServiceBusExpiryPlugin")
                   .end("broker-plugin")
                   .startAttr("broker-plugin", "class-name",
-                          "io.floci.az.artemis.ServiceBusPeekPlugin")
+                          "io.floci.az.artemis.ServiceBusManagementPlugin")
                   .end("broker-plugin")
                 .end("broker-plugins")
                 .start("address-settings")
@@ -74,7 +75,7 @@ public class ServiceBusConfigGenerator {
                   .startAttr("divert", "name", "cbs-request-intercept")
                     .elem("address", "$cbs")
                     .elem("forwarding-address", "$cbs-intercept")
-                    .selfClose("filter", "string", ServiceBusCbsResponder.REQUEST_FILTER)
+                    .selfClose("filter", "string", AmqpManagementReply.REQUEST_FILTER)
                     .elem("exclusive", true)
                   .end("divert")
                 .end("diverts")

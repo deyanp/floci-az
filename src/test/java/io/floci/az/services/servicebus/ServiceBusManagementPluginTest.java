@@ -37,7 +37,7 @@ import static org.mockito.Mockito.when;
  * carries the stamp of the requesting connection, which keeps it to that connection, but Azure
  * sends no stamp, so the client must receive the response without it.
  */
-class ServiceBusPeekPluginTest {
+class ServiceBusManagementPluginTest {
 
     private static final String PROPERTY = "floci_connection_id";
 
@@ -80,7 +80,7 @@ class ServiceBusPeekPluginTest {
 
         try (URLClassLoader loader = jarLoader()) {
             ActiveMQServerPlugin plugin = (ActiveMQServerPlugin) Class.forName(
-                    "io.floci.az.artemis.ServiceBusPeekPlugin", true, loader)
+                    "io.floci.az.artemis.ServiceBusManagementPlugin", true, loader)
                     .getDeclaredConstructor().newInstance();
             plugin.registered(server);
 

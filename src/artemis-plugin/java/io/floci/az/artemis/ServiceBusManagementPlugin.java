@@ -36,10 +36,10 @@ import java.util.Map;
  * which names the operation: a request that reached routing unanswered would otherwise reach no
  * one, and the client would wait for a reply until it timed out.
  */
-public final class ServiceBusPeekPlugin implements ActiveMQServerPlugin {
+public final class ServiceBusManagementPlugin implements ActiveMQServerPlugin {
 
     private static final System.Logger LOG =
-            System.getLogger(ServiceBusPeekPlugin.class.getName());
+            System.getLogger(ServiceBusManagementPlugin.class.getName());
     private static final String MANAGEMENT_SUFFIX = "/$management";
     private static final String PEEK_OPERATION = "com.microsoft:peek-message";
     private static final String OPERATION = "operation";
@@ -309,7 +309,7 @@ public final class ServiceBusPeekPlugin implements ActiveMQServerPlugin {
     private ActiveMQServer requireServer() {
         ActiveMQServer activeServer = server;
         if (activeServer == null) {
-            throw new IllegalStateException("Service Bus peek plugin is not registered");
+            throw new IllegalStateException("Service Bus management plugin is not registered");
         }
         return activeServer;
     }

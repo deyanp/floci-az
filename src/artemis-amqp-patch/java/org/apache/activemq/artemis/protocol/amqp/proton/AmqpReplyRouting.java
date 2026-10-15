@@ -33,10 +33,10 @@ import org.apache.qpid.proton.engine.Record;
 public final class AmqpReplyRouting {
 
    /**
-    * Name of the stamp: the id of the requesting connection. The responders that copy it are built
-    * into other jars and cannot see this constant, so the name is duplicated in
-    * {@code ServiceBusCbsResponder} (which the Event Hubs management responder uses as well) and in
-    * {@code ServiceBusPeekPlugin}.
+    * Name of the stamp: the id of the requesting connection. The code that copies it onto replies
+    * is built into other jars and cannot see this constant, so the name is duplicated in
+    * {@code AmqpManagementReply} (which both responders build their replies with) and in
+    * {@code ServiceBusManagementPlugin}.
     */
    public static final String CONNECTION_ID_PROPERTY = "floci_connection_id";
 

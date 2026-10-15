@@ -1,9 +1,9 @@
 package io.floci.az.services.eventhub;
 
 import io.floci.az.config.EmulatorConfig;
+import io.floci.az.core.AmqpManagementReply;
 import io.floci.az.core.XmlBuilder;
 import io.floci.az.core.docker.ContainerStorageHelper;
-import io.floci.az.services.servicebus.ServiceBusCbsResponder;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -231,13 +231,13 @@ public class ArtemisConfigGenerator {
              .startAttr("divert", "name", "cbs-request-intercept")
                .elem("address", CBS_ADDRESS)
                .elem("forwarding-address", CBS_INTERCEPT_ADDRESS)
-               .selfClose("filter", "string", ServiceBusCbsResponder.REQUEST_FILTER)
+               .selfClose("filter", "string", AmqpManagementReply.REQUEST_FILTER)
                .elem("exclusive", true)
              .end("divert")
              .startAttr("divert", "name", "management-request-intercept")
                .elem("address", MANAGEMENT_ADDRESS)
                .elem("forwarding-address", MANAGEMENT_INTERCEPT_ADDRESS)
-               .selfClose("filter", "string", ServiceBusCbsResponder.REQUEST_FILTER)
+               .selfClose("filter", "string", AmqpManagementReply.REQUEST_FILTER)
                .elem("exclusive", true)
              .end("divert")
            .end("diverts");

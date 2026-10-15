@@ -1,6 +1,6 @@
 package io.floci.az.services.eventhub;
 
-import io.floci.az.services.servicebus.ServiceBusCbsResponder;
+import io.floci.az.core.AmqpManagementReply;
 import org.apache.qpid.proton.Proton;
 import org.apache.qpid.proton.amqp.messaging.Accepted;
 import org.apache.qpid.proton.amqp.messaging.AmqpValue;
@@ -170,7 +170,7 @@ public class EventHubManagementResponder {
             LOG.debugv("Management request received: operation={0}, type={1}, name={2}",
                     props.get("operation"), props.get("type"), props.get("name"));
 
-            byte[] encoded = ServiceBusCbsResponder.encode(replyTo(request));
+            byte[] encoded = AmqpManagementReply.encode(replyTo(request));
             byte[] tag = Integer.toString(deliveryTag++).getBytes(StandardCharsets.UTF_8);
             Delivery resp = responseSender.delivery(tag);
             responseSender.send(encoded, 0, encoded.length);
@@ -185,9 +185,9 @@ public class EventHubManagementResponder {
 
     /** The reply to a management request: a READ as Azure answers it, and 501 to any other operation. */
     Message replyTo(Message request) {
-        String operation = ServiceBusCbsResponder.operation(request);
+        String operation = AmqpManagementReply.operation(request);
         if (!READ.equals(operation)) {
-            return ServiceBusCbsResponder.notImplemented(request, operation);
+            return AmqpManagementReply.notImplemented(request, operation);
         }
         Map<String, Object> props = applicationProperties(request);
         String entityType = string(props.get("type"));
@@ -196,14 +196,14 @@ public class EventHubManagementResponder {
             // Partition properties (com.microsoft:partition) would have to report sequence
             // numbers and offsets, which Artemis does not keep. Saying so is better than
             // inventing values a consumer may branch on.
-            return ServiceBusCbsResponder.reply(request, ServiceBusCbsResponder.NOT_IMPLEMENTED,
+            return AmqpManagementReply.to(request, AmqpManagementReply.NOT_IMPLEMENTED,
                     "floci-az emulates " + EVENTHUB_ENTITY_TYPE + " only, not " + entityType);
         }
         ArtemisConfigGenerator.EntitySpec spec = name == null ? null : entities.get(name);
         if (spec == null) {
-            return ServiceBusCbsResponder.reply(request, 404, "Event hub '" + name + "' not found");
+            return AmqpManagementReply.to(request, 404, "Event hub '" + name + "' not found");
         }
-        Message response = ServiceBusCbsResponder.reply(request, 200, "OK");
+        Message response = AmqpManagementReply.to(request, 200, "OK");
         response.setBody(new AmqpValue(hubProperties(name, spec)));
         return response;
     }

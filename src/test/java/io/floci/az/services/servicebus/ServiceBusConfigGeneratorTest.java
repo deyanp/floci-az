@@ -39,7 +39,7 @@ class ServiceBusConfigGeneratorTest {
         assertTrue(brokerXml.contains(
                 "class-name=\"io.floci.az.artemis.ServiceBusExpiryPlugin\""));
         assertTrue(brokerXml.contains(
-                "class-name=\"io.floci.az.artemis.ServiceBusPeekPlugin\""));
+                "class-name=\"io.floci.az.artemis.ServiceBusManagementPlugin\""));
         assertTrue(brokerXml.contains("<enable-ingress-timestamp>true</enable-ingress-timestamp>"));
     }
 
@@ -95,7 +95,7 @@ class ServiceBusConfigGeneratorTest {
                 Set<String> expectedClasses = Set.of(
                         "io/floci/az/artemis/ServiceBusExpiryPlugin.class",
                         "io/floci/az/artemis/ServiceBusExpiryPluginMBean.class",
-                        "io/floci/az/artemis/ServiceBusPeekPlugin.class");
+                        "io/floci/az/artemis/ServiceBusManagementPlugin.class");
                 Set<String> packagedClasses = new HashSet<>();
                 for (var entry = jar.getNextJarEntry(); entry != null; entry = jar.getNextJarEntry()) {
                     if (expectedClasses.contains(entry.getName())) {

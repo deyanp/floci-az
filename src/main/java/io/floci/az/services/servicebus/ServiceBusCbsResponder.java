@@ -1,8 +1,8 @@
 package io.floci.az.services.servicebus;
 
+import io.floci.az.core.AmqpManagementReply;
 import org.apache.qpid.proton.Proton;
 import org.apache.qpid.proton.amqp.messaging.Accepted;
-import org.apache.qpid.proton.amqp.messaging.ApplicationProperties;
 import org.apache.qpid.proton.amqp.messaging.Source;
 import org.apache.qpid.proton.amqp.messaging.Target;
 import org.apache.qpid.proton.engine.BaseHandler;
@@ -16,11 +16,8 @@ import org.apache.qpid.proton.message.Message;
 import org.apache.qpid.proton.reactor.Reactor;
 import org.jboss.logging.Logger;
 
-import java.nio.BufferOverflowException;
 import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
 import java.util.HashMap;
-import java.util.Map;
 
 /**
  * Daemon thread that handles AMQP CBS (Claims Based Security) for a namespace.
@@ -52,25 +49,7 @@ public class ServiceBusCbsResponder {
     private static final String CBS_INTERCEPT_ADDRESS = "$cbs-intercept";
     private static final long RECONNECT_BACKOFF_MS = 2_000;
 
-    /**
-     * Application property that carries the id of the connection that sent a request. The
-     * broker's AMQP layer ({@code AmqpReplyRouting}) sets it and filters on it. That class is built
-     * into the patched AMQP protocol jar, so the name is duplicated here.
-     */
-    static final String CONNECTION_ID_PROPERTY = "floci_connection_id";
-
-    /** Every CBS and management request names its operation. */
-    private static final String OPERATION = "operation";
     private static final String PUT_TOKEN = "put-token";
-    /** The AMQP management status for an operation a node does not implement. */
-    public static final int NOT_IMPLEMENTED = 501;
-
-    /**
-     * The filter of the divert that sends requests to a responder: every request, since a request
-     * names its operation and a reply never does. The responder answers each one, so no request
-     * goes unanswered, and its own replies, which go back to the same address, do not loop back.
-     */
-    public static final String REQUEST_FILTER = OPERATION + " IS NOT NULL";
 
     private final String host;
     private final int port;
@@ -146,67 +125,10 @@ public class ServiceBusCbsResponder {
 
     /** The reply to a CBS request: 202 to a put-token, and 501 to any other operation. */
     static Message replyTo(Message request) {
-        String operation = operation(request);
+        String operation = AmqpManagementReply.operation(request);
         return PUT_TOKEN.equals(operation)
-                ? reply(request, 202, "Accepted")
-                : notImplemented(request, operation);
-    }
-
-    /**
-     * A reply to a CBS or management request, built the same way by every responder: correlated
-     * to the request by its message id, with the status in the properties the AMQP management
-     * specification names, and with the stamp of the requesting connection.
-     */
-    public static Message reply(Message request, int statusCode, String statusDescription) {
-        Message reply = Message.Factory.create();
-        reply.setCorrelationId(request.getMessageId());
-        Map<String, Object> properties = new HashMap<>();
-        properties.put("status-code", statusCode);
-        properties.put("status-description", statusDescription);
-        copyConnectionId(request, properties);
-        reply.setApplicationProperties(new ApplicationProperties(properties));
-        return reply;
-    }
-
-    /** The reply to an operation floci-az does not implement: 501, naming the operation. */
-    public static Message notImplemented(Message request, String operation) {
-        return reply(request, NOT_IMPLEMENTED, "floci-az does not implement the operation '" + operation + "'");
-    }
-
-    /** The operation a request names, or null if it names none. */
-    public static String operation(Message request) {
-        ApplicationProperties props = request.getApplicationProperties();
-        Object operation = props == null ? null : props.getValue().get(OPERATION);
-        return operation == null ? null : operation.toString();
-    }
-
-    /**
-     * Encodes a reply. The buffer grows until the reply fits: a reply names the operation and the
-     * correlation id the client chose, so its size is not fixed.
-     */
-    public static byte[] encode(Message message) {
-        int capacity = 1_024;
-        while (true) {
-            byte[] buffer = new byte[capacity];
-            try {
-                int length = message.encode(buffer, 0, buffer.length);
-                return Arrays.copyOf(buffer, length);
-            } catch (BufferOverflowException tooSmall) {
-                capacity *= 2;
-            }
-        }
-    }
-
-    /**
-     * Copies the id of the requesting connection onto the application properties of a reply. A
-     * reply without it reaches no receiver.
-     */
-    public static void copyConnectionId(Message request, Map<String, Object> replyProperties) {
-        ApplicationProperties props = request.getApplicationProperties();
-        Object connectionId = props == null ? null : props.getValue().get(CONNECTION_ID_PROPERTY);
-        if (connectionId != null) {
-            replyProperties.put(CONNECTION_ID_PROPERTY, connectionId);
-        }
+                ? AmqpManagementReply.to(request, 202, "Accepted")
+                : AmqpManagementReply.notImplemented(request, operation);
     }
 
     private class CbsHandler extends BaseHandler {
@@ -252,7 +174,7 @@ public class ServiceBusCbsResponder {
             request.decode(buf, 0, n);
 
             LOG.debugv("CBS request received, operation={0}, messageId={1}",
-                    operation(request), request.getMessageId());
+                    AmqpManagementReply.operation(request), request.getMessageId());
 
             send(replyTo(request));
 
@@ -262,7 +184,7 @@ public class ServiceBusCbsResponder {
         }
 
         private void send(Message response) {
-            byte[] encoded = encode(response);
+            byte[] encoded = AmqpManagementReply.encode(response);
             byte[] tag = Integer.toString(deliveryTag++).getBytes(StandardCharsets.UTF_8);
             Delivery resp = responseSender.delivery(tag);
             responseSender.send(encoded, 0, encoded.length);
