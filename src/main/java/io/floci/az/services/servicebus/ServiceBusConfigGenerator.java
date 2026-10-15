@@ -74,7 +74,7 @@ public class ServiceBusConfigGenerator {
                   .startAttr("divert", "name", "cbs-request-intercept")
                     .elem("address", "$cbs")
                     .elem("forwarding-address", "$cbs-intercept")
-                    .selfClose("filter", "string", "operation = 'put-token'")
+                    .selfClose("filter", "string", ServiceBusCbsResponder.REQUEST_FILTER)
                     .elem("exclusive", true)
                   .end("divert")
                 .end("diverts")

@@ -50,6 +50,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *
  * <p>The broker routes each reply by a property of its own, which Azure never sends. Each reply
  * must reach the client without it, so that the client sees the reply as Azure sends it.
+ *
+ * <p>An operation floci-az does not implement gets a reply too: 501 (Not Implemented), on the
+ * requesting connection only. The request itself never comes back to a client.
  */
 @DisplayName("CBS and management replies")
 class AmqpReplyRoutingCompatibilityTest {
@@ -120,6 +123,43 @@ class AmqpReplyRoutingCompatibilityTest {
                         Map.of("operation", "com.microsoft:renew-lock"),
                         Map.of("lock-tokens", new UUID[]{UUID.randomUUID()})),
                 "statusCode", 410);
+    }
+
+    @Test
+    @DisplayName("Event Hubs: each connection receives only the 501 to its own CBS operation other than put-token")
+    void eventHubUnimplementedCbsOperation() throws Exception {
+        assertEachConnectionGetsOnlyItsOwnReply(eventHubBroker(), "$cbs",
+                requestId -> request(requestId, Map.of(
+                        "operation", "delete-token",
+                        "type", "servicebus.windows.net:sastoken",
+                        "name", "amqp://" + EmulatorConfig.EVENTHUB_HOST + "/" + EmulatorConfig.EVENTHUB_NAME), null),
+                "status-code", 501);
+    }
+
+    @Test
+    @DisplayName("Event Hubs: each connection receives only the 501 to its own management operation other than READ")
+    void eventHubUnimplementedManagementOperation() throws Exception {
+        assertEachConnectionGetsOnlyItsOwnReply(eventHubBroker(), "$management",
+                requestId -> request(requestId, Map.of(
+                        "operation", "UPDATE",
+                        "type", "com.microsoft:eventhub",
+                        "name", EmulatorConfig.EVENTHUB_NAME), null),
+                "status-code", 501);
+    }
+
+    /** Scheduling a message is a management operation floci-az does not implement. */
+    @Test
+    @DisplayName("Service Bus: each connection receives only the 501 to its own schedule-message")
+    void serviceBusUnimplementedOperation() throws Exception {
+        Broker broker = serviceBusBroker();
+        String queue = "replies-" + UUID.randomUUID().toString().substring(0, 8);
+        EmulatorConfig.ensureServiceBusQueue(queue, false);
+
+        assertEachConnectionGetsOnlyItsOwnReply(broker, queue + "/$management",
+                requestId -> request(requestId,
+                        Map.of("operation", "com.microsoft:schedule-message"),
+                        Map.of("messages", List.of())),
+                "statusCode", 501);
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
@@ -194,9 +234,13 @@ class AmqpReplyRoutingCompatibilityTest {
         for (int i = 0; i < CONNECTIONS; i++) {
             List<Object> correlationIds = new ArrayList<>();
             for (Message reply : exchange.replies.get(i)) {
-                Map<?, ?> properties = reply.getApplicationProperties().getValue();
-                assertEquals(expectedStatus, ((Number) properties.get(statusProperty)).intValue(),
-                        "connection " + i + " received an unexpected reply");
+                Map<?, ?> properties = reply.getApplicationProperties() == null
+                        ? Map.of() : reply.getApplicationProperties().getValue();
+                assertFalse(properties.containsKey("operation"),
+                        "connection " + i + " received a request, not a reply: " + properties);
+                Object status = properties.get(statusProperty);
+                assertEquals(expectedStatus, status instanceof Number number ? number.intValue() : -1,
+                        "connection " + i + " received an unexpected reply: " + properties);
                 assertFalse(properties.containsKey(ROUTING_PROPERTY),
                         "connection " + i + " received a reply with " + ROUTING_PROPERTY
                                 + ", which Azure never sends: " + properties);

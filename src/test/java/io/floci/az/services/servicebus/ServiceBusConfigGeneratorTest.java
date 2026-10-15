@@ -56,7 +56,7 @@ class ServiceBusConfigGeneratorTest {
 
         assertTrue(brokerXml.contains("<address>$cbs</address>"));
         assertTrue(brokerXml.contains("<forwarding-address>$cbs-intercept</forwarding-address>"));
-        assertTrue(brokerXml.contains("<filter string=\"operation = &apos;put-token&apos;\"/>"));
+        assertTrue(brokerXml.contains("<filter string=\"operation IS NOT NULL\"/>"));
         assertTrue(brokerXml.contains("<exclusive>true</exclusive>"));
         assertTrue(brokerXml.contains("<address name=\"$cbs\"><multicast/></address>"));
         assertTrue(brokerXml.contains("<queue name=\"$cbs-intercept\"/>"));

@@ -16,7 +16,9 @@ import org.apache.qpid.proton.message.Message;
 import org.apache.qpid.proton.reactor.Reactor;
 import org.jboss.logging.Logger;
 
+import java.nio.BufferOverflowException;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -32,6 +34,9 @@ import java.util.Map;
  * The reply carries status-code 202 (Accepted), as the AMQP CBS specification requires for
  * put-token. Some SDK stacks accept 200; others reject anything but 202 (the Rust
  * {@code fe2o3-amqp-cbs} hard-codes it), so the specified code is the interoperable one.
+ *
+ * The divert sends every request on {@code $cbs} here, and every request gets a reply. An
+ * operation other than put-token gets 501 (Not Implemented), which names the operation.
  *
  * The reply reaches only the connection that sent the request, as in Azure: the broker stamps
  * each request with the id of its connection, a receiver on {@code $cbs} gets only the messages
@@ -53,6 +58,19 @@ public class ServiceBusCbsResponder {
      * into the patched AMQP protocol jar, so the name is duplicated here.
      */
     static final String CONNECTION_ID_PROPERTY = "floci_connection_id";
+
+    /** Every CBS and management request names its operation. */
+    private static final String OPERATION = "operation";
+    private static final String PUT_TOKEN = "put-token";
+    /** The AMQP management status for an operation a node does not implement. */
+    public static final int NOT_IMPLEMENTED = 501;
+
+    /**
+     * The filter of the divert that sends requests to a responder: every request, since a request
+     * names its operation and a reply never does. The responder answers each one, so no request
+     * goes unanswered, and its own replies, which go back to the same address, do not loop back.
+     */
+    public static final String REQUEST_FILTER = OPERATION + " IS NOT NULL";
 
     private final String host;
     private final int port;
@@ -126,6 +144,59 @@ public class ServiceBusCbsResponder {
         }
     }
 
+    /** The reply to a CBS request: 202 to a put-token, and 501 to any other operation. */
+    static Message replyTo(Message request) {
+        String operation = operation(request);
+        return PUT_TOKEN.equals(operation)
+                ? reply(request, 202, "Accepted")
+                : notImplemented(request, operation);
+    }
+
+    /**
+     * A reply to a CBS or management request, built the same way by every responder: correlated
+     * to the request by its message id, with the status in the properties the AMQP management
+     * specification names, and with the stamp of the requesting connection.
+     */
+    public static Message reply(Message request, int statusCode, String statusDescription) {
+        Message reply = Message.Factory.create();
+        reply.setCorrelationId(request.getMessageId());
+        Map<String, Object> properties = new HashMap<>();
+        properties.put("status-code", statusCode);
+        properties.put("status-description", statusDescription);
+        copyConnectionId(request, properties);
+        reply.setApplicationProperties(new ApplicationProperties(properties));
+        return reply;
+    }
+
+    /** The reply to an operation floci-az does not implement: 501, naming the operation. */
+    public static Message notImplemented(Message request, String operation) {
+        return reply(request, NOT_IMPLEMENTED, "floci-az does not implement the operation '" + operation + "'");
+    }
+
+    /** The operation a request names, or null if it names none. */
+    public static String operation(Message request) {
+        ApplicationProperties props = request.getApplicationProperties();
+        Object operation = props == null ? null : props.getValue().get(OPERATION);
+        return operation == null ? null : operation.toString();
+    }
+
+    /**
+     * Encodes a reply. The buffer grows until the reply fits: a reply names the operation and the
+     * correlation id the client chose, so its size is not fixed.
+     */
+    public static byte[] encode(Message message) {
+        int capacity = 1_024;
+        while (true) {
+            byte[] buffer = new byte[capacity];
+            try {
+                int length = message.encode(buffer, 0, buffer.length);
+                return Arrays.copyOf(buffer, length);
+            } catch (BufferOverflowException tooSmall) {
+                capacity *= 2;
+            }
+        }
+    }
+
     /**
      * Copies the id of the requesting connection onto the application properties of a reply. A
      * reply without it reaches no receiver.
@@ -180,31 +251,21 @@ public class ServiceBusCbsResponder {
             Message request = Message.Factory.create();
             request.decode(buf, 0, n);
 
-            Object messageId = request.getMessageId();
-            LOG.debugv("CBS put-token received, messageId={0}", messageId);
+            LOG.debugv("CBS request received, operation={0}, messageId={1}",
+                    operation(request), request.getMessageId());
 
-            sendOkResponse(request);
+            send(replyTo(request));
 
             delivery.disposition(Accepted.getInstance());
             delivery.settle();
             receiver.flow(1);
         }
 
-        private void sendOkResponse(Message request) {
-            Message response = Message.Factory.create();
-            response.setCorrelationId(request.getMessageId());
-            Map<String, Object> props = new HashMap<>();
-            props.put("status-code", 202);
-            props.put("status-description", "Accepted");
-            copyConnectionId(request, props);
-            response.setApplicationProperties(new ApplicationProperties(props));
-
-            byte[] encoded = new byte[512];
-            int len = response.encode(encoded, 0, encoded.length);
-
+        private void send(Message response) {
+            byte[] encoded = encode(response);
             byte[] tag = Integer.toString(deliveryTag++).getBytes(StandardCharsets.UTF_8);
             Delivery resp = responseSender.delivery(tag);
-            responseSender.send(encoded, 0, len);
+            responseSender.send(encoded, 0, encoded.length);
             responseSender.advance();
             resp.settle();
         }

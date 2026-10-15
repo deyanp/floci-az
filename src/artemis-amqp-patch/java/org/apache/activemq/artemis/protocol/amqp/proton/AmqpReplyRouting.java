@@ -106,9 +106,10 @@ public final class AmqpReplyRouting {
 
    /**
     * The selector of a subscription on {@code address}. On a reply address it matches only the
-    * replies stamped with this connection's id, and the client's own selector, if it sent one, is
-    * kept in parentheses so that an {@code OR} in it cannot widen the match. On any other address
-    * the client's selector is returned unchanged.
+    * replies stamped with this connection's id, and never a request: a client receives replies
+    * only, as in Azure. The client's own selector, if it sent one, is kept in parentheses so that
+    * an {@code OR} in it cannot widen the match. On any other address the client's selector is
+    * returned unchanged.
     *
     * <p>Artemis looks a selector's property up in the application properties first and in the
     * broker properties next ({@code AMQPMessage#getObjectPropertyForFilter}), so the selector
@@ -118,7 +119,7 @@ public final class AmqpReplyRouting {
       if (!isReplyAddress(address)) {
          return selector;
       }
-      String ownReplies = CONNECTION_ID_PROPERTY + " = '" + connectionId(connection) + "'";
+      String ownReplies = CONNECTION_ID_PROPERTY + " = '" + connectionId(connection) + "' AND " + OPERATION + " IS NULL";
       return selector == null || selector.isBlank() ? ownReplies : "(" + selector + ") AND " + ownReplies;
    }
 

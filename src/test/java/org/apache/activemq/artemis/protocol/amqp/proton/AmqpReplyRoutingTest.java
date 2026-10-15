@@ -36,8 +36,8 @@ import static org.mockito.Mockito.when;
  * A reply on {@code $cbs} or {@code $management} goes back to an address every client receives
  * on. These cover both halves of keeping it to the client that asked: the broker stamps a request
  * with the connection that sent it, and a receiver on a reply address gets a selector that lets
- * through its own connection's replies and nothing else. Azure sends no stamp, so they also cover
- * that a reply reaches the client without it.
+ * through its own connection's replies and nothing else, never a request. Azure sends no stamp, so
+ * they also cover that a reply reaches the client without it.
  */
 class AmqpReplyRoutingTest {
 
@@ -206,10 +206,29 @@ class AmqpReplyRoutingTest {
         String selector = selector(mine, "$cbs", "kind = 'a' OR kind = 'b'");
         Filter filter = FilterImpl.createFilter(selector);
 
-        assertEquals("(kind = 'a' OR kind = 'b') AND " + PROPERTY + " = '" + idOf(mine) + "'", selector);
+        assertEquals("(kind = 'a' OR kind = 'b') AND " + PROPERTY + " = '" + idOf(mine) + "' AND operation IS NULL",
+                selector);
         assertTrue(filter.match(responderReply("$cbs", Map.of("kind", "b", PROPERTY, idOf(mine)))));
         assertFalse(filter.match(responderReply("$cbs", Map.of("kind", "a", PROPERTY, idOf(theirs)))));
         assertFalse(filter.match(responderReply("$cbs", Map.of("kind", "c", PROPERTY, idOf(mine)))));
+        assertFalse(filter.match(stampedRequest(mine, "$cbs", Map.of("operation", "put-token", "kind", "a"))),
+                "an OR in the client's selector let a request through");
+    }
+
+    /**
+     * A request that no responder took would otherwise reach the subscription of the connection
+     * that sent it, which matches its stamp, and come back to its sender as if it were the reply.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"$cbs", "$management", "orders/$management"})
+    @DisplayName("a receiver on a reply address never takes a request, not even its own connection's")
+    void receiverNeverTakesARequest(String address) throws Exception {
+        AMQPConnectionContext mine = connection();
+
+        Filter filter = FilterImpl.createFilter(selector(mine, address, null));
+
+        assertFalse(filter.match(stampedRequest(mine, address, Map.of("operation", "com.microsoft:schedule-message"))));
+        assertTrue(filter.match(responderReply(address, Map.of("status-code", 501, PROPERTY, idOf(mine)))));
     }
 
     @Test
@@ -266,10 +285,18 @@ class AmqpReplyRoutingTest {
         return reply;
     }
 
+    /** A request from {@code requester} as the broker holds it once it has arrived: stamped. */
+    private static AMQPMessage stampedRequest(AMQPConnectionContext requester, String address,
+                                              Map<String, Object> applicationProperties) throws Exception {
+        AMQPMessage request = message(applicationProperties);
+        receive(requester, address, request);
+        return request;
+    }
+
     /** A reply the broker builds itself, to a request from {@code requester}. */
     private static AMQPMessage brokerReply(AMQPConnectionContext requester) throws Exception {
-        AMQPMessage request = message(Map.of("operation", "com.microsoft:peek-message"));
-        receive(requester, "orders/$management", request);
+        AMQPMessage request = stampedRequest(requester, "orders/$management",
+                Map.of("operation", "com.microsoft:peek-message"));
         AMQPMessage reply = message(Map.of("statusCode", 204));
         copy(request, reply);
         return reply;

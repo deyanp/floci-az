@@ -32,9 +32,10 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * The broker answers a Service Bus peek itself, in a plugin. The response carries the stamp of
- * the requesting connection, which keeps it to that connection, but Azure sends no stamp, so the
- * client must receive the response without it.
+ * The broker answers the requests on a Service Bus entity management node itself, in a plugin:
+ * peek as Azure does, and any operation floci-az does not implement with 501. The response
+ * carries the stamp of the requesting connection, which keeps it to that connection, but Azure
+ * sends no stamp, so the client must receive the response without it.
  */
 class ServiceBusPeekPluginTest {
 
@@ -43,8 +44,38 @@ class ServiceBusPeekPluginTest {
     @Test
     @DisplayName("a peek response reaches only the requesting connection, and without the stamp")
     void peekResponseKeepsTheStampOffTheWire() throws Exception {
-        ActiveMQServer server = mock(ActiveMQServer.class, RETURNS_DEEP_STUBS);
         // No queue has that name, so the plugin answers 404, which is a response like any other.
+        AMQPMessage response = answer(request("com.microsoft:peek-message",
+                Map.of("from-sequence-number", 0L, "message-count", 1)), mock(RoutingContext.class));
+
+        assertEquals(Map.of("statusCode", 404, "statusDescription", "Not Found"), propertiesOnTheWire(response));
+        assertTrue(FilterImpl.createFilter(PROPERTY + " = 'requesting-connection'").match(response));
+        assertFalse(FilterImpl.createFilter(PROPERTY + " = 'another-connection'").match(response));
+    }
+
+    /**
+     * An operation nobody answers would leave the client waiting for a reply until it timed out.
+     * The request itself must not reach the client either.
+     */
+    @Test
+    @DisplayName("any other operation gets 501, which names the operation, and only the requesting connection receives it")
+    void otherOperationsAreNotImplemented() throws Exception {
+        RoutingContext context = mock(RoutingContext.class);
+
+        AMQPMessage response = answer(request("com.microsoft:schedule-message", Map.of()), context);
+
+        verify(context).clear();
+        assertEquals("request-1", response.getProperties().getCorrelationId());
+        assertEquals(Map.of("statusCode", 501,
+                "statusDescription", "floci-az does not implement the operation 'com.microsoft:schedule-message'"),
+                propertiesOnTheWire(response));
+        assertTrue(FilterImpl.createFilter(PROPERTY + " = 'requesting-connection'").match(response));
+        assertFalse(FilterImpl.createFilter(PROPERTY + " = 'another-connection'").match(response));
+    }
+
+    /** Runs the plugin on one request and returns the response it routes. */
+    private AMQPMessage answer(AMQPMessage request, RoutingContext context) throws Exception {
+        ActiveMQServer server = mock(ActiveMQServer.class, RETURNS_DEEP_STUBS);
         when(server.locateQueue(any(SimpleString.class))).thenReturn(null);
 
         try (URLClassLoader loader = jarLoader()) {
@@ -53,24 +84,20 @@ class ServiceBusPeekPluginTest {
                     .getDeclaredConstructor().newInstance();
             plugin.registered(server);
 
-            plugin.beforeMessageRoute(peekRequest("requesting-connection"), mock(RoutingContext.class), false, false);
+            plugin.beforeMessageRoute(request, context, false, false);
         }
 
         ArgumentCaptor<Message> routed = ArgumentCaptor.forClass(Message.class);
         verify(server.getPostOffice()).route(routed.capture(), eq(false));
-        AMQPMessage response = (AMQPMessage) routed.getValue();
-        assertEquals(Map.of("statusCode", 404, "statusDescription", "Not Found"), propertiesOnTheWire(response));
-        assertTrue(FilterImpl.createFilter(PROPERTY + " = 'requesting-connection'").match(response));
-        assertFalse(FilterImpl.createFilter(PROPERTY + " = 'another-connection'").match(response));
+        return (AMQPMessage) routed.getValue();
     }
 
-    /** A peek request as the broker holds it: the AMQP layer has stamped it already. */
-    private static AMQPMessage peekRequest(String connectionId) {
+    /** A request as the broker holds it: the AMQP layer has stamped it already. */
+    private static AMQPMessage request(String operation, Map<String, Object> body) {
         Properties properties = new Properties();
-        properties.setMessageId("peek-1");
+        properties.setMessageId("request-1");
         AMQPStandardMessage request = AMQPStandardMessage.createMessage(0, 0, null, null, properties, null, null,
-                Map.of("operation", "com.microsoft:peek-message", PROPERTY, connectionId), null,
-                new AmqpValue(Map.of("from-sequence-number", 0L, "message-count", 1)));
+                Map.of("operation", operation, PROPERTY, "requesting-connection"), null, new AmqpValue(body));
         request.setAddress("orders/$management");
         return request;
     }

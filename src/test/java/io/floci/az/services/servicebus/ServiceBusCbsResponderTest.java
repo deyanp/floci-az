@@ -18,7 +18,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * The broker stamps each CBS and management request with the id of the connection that sent it,
  * and a client receives only the replies that carry its own id back. A responder that drops the
- * stamp sends a reply nobody receives.
+ * stamp sends a reply nobody receives. Every request gets a reply, and an operation floci-az does
+ * not implement gets 501.
  */
 class ServiceBusCbsResponderTest {
 
@@ -51,6 +52,41 @@ class ServiceBusCbsResponderTest {
         }
     }
 
+    @Test
+    @DisplayName("a put-token gets 202, correlated to its request and carrying its stamp")
+    void acceptsAPutToken() {
+        Message reply = ServiceBusCbsResponder.replyTo(request("put-token"));
+
+        assertEquals("request-1", reply.getCorrelationId());
+        assertEquals(Map.of("status-code", 202, "status-description", "Accepted",
+                ServiceBusCbsResponder.CONNECTION_ID_PROPERTY, "requesting-connection"), properties(reply));
+    }
+
+    @Test
+    @DisplayName("any other CBS operation gets 501, which names the operation")
+    void answersOtherOperationsWithNotImplemented() {
+        Message reply = ServiceBusCbsResponder.replyTo(request("delete-token"));
+
+        assertEquals("request-1", reply.getCorrelationId());
+        assertEquals(Map.of("status-code", 501,
+                "status-description", "floci-az does not implement the operation 'delete-token'",
+                ServiceBusCbsResponder.CONNECTION_ID_PROPERTY, "requesting-connection"), properties(reply));
+    }
+
+    /** The reply names the operation the client chose, so it can outgrow any fixed buffer. */
+    @Test
+    @DisplayName("a reply that names a long operation still encodes whole")
+    void encodesALongReply() {
+        String operation = "x".repeat(5_000);
+
+        byte[] encoded = ServiceBusCbsResponder.encode(ServiceBusCbsResponder.replyTo(request(operation)));
+        Message decoded = Message.Factory.create();
+        decoded.decode(encoded, 0, encoded.length);
+
+        assertEquals("floci-az does not implement the operation '" + operation + "'",
+                properties(decoded).get("status-description"));
+    }
+
     /**
      * The property is set and filtered on in the patched AMQP jar and copied here and in the
      * broker plugin, so its name is spelled in three jars. A spelling that drifts breaks no build:
@@ -67,6 +103,21 @@ class ServiceBusCbsResponderTest {
             assertEquals(ServiceBusCbsResponder.CONNECTION_ID_PROPERTY, constant(plugin,
                     "io.floci.az.artemis.ServiceBusPeekPlugin", "CONNECTION_ID_PROPERTY"));
         }
+    }
+
+    /** A request as the responder receives it: stamped with the id of the connection that sent it. */
+    private static Message request(String operation) {
+        Message request = Message.Factory.create();
+        request.setMessageId("request-1");
+        request.setApplicationProperties(new ApplicationProperties(Map.of(
+                "operation", operation,
+                ServiceBusCbsResponder.CONNECTION_ID_PROPERTY, "requesting-connection")));
+        return request;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> properties(Message reply) {
+        return reply.getApplicationProperties().getValue();
     }
 
     private URLClassLoader jarLoader(String resource) {
