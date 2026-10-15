@@ -10,6 +10,7 @@ import com.azure.messaging.eventhubs.EventHubProducerClient;
 import com.azure.messaging.eventhubs.models.CreateBatchOptions;
 import com.azure.messaging.eventhubs.models.EventPosition;
 import com.azure.messaging.eventhubs.models.PartitionEvent;
+import com.azure.messaging.eventhubs.models.ReceiveOptions;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.jms.Connection;
 import jakarta.jms.JMSException;
@@ -26,6 +27,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.Signal;
 
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -54,7 +56,11 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 class EventHubStreamCompatibilityTest {
 
     private static final String CONSUMER_GROUP = "$Default";
-    /** A consumer group no other test reads, so that only this class's receivers count toward its limits. */
+    /**
+     * A consumer group no other test reads, so that only this class's receivers count toward its
+     * limits. Each test of the limits reads a partition of its own, so that the receivers one test
+     * closes cannot count toward the next one's.
+     */
     private static final String LIMITS_CONSUMER_GROUP = "my-consumer-group";
     private static final String PARTITION = "1";
     private static final int EVENT_COUNT = 5;
@@ -185,7 +191,45 @@ class EventHubStreamCompatibilityTest {
         }
     }
 
+    /**
+     * A receiver with an owner level, which Azure calls the epoch, owns its partition in its
+     * consumer group. One with a higher owner level disconnects it with {@code amqp:link:stolen},
+     * which the SDK reports as the consumer disconnected.
+     */
+    @Test
+    @DisplayName("a receiver with a higher owner level disconnects the current owner")
+    void aHigherOwnerLevelDisconnectsTheOwner() throws InterruptedException {
+        try (EventHubConsumerAsyncClient owner = limitsConsumer(); EventHubConsumerAsyncClient next = limitsConsumer()) {
+            Mono<Signal<Void>> ownerEnds = owner.receiveFromPartition("2", EventPosition.latest(), ownerLevel(1))
+                    .then().materialize().cache();
+            ownerEnds.subscribe();
+            Thread.sleep(ATTACH_WAIT_MS);
+
+            next.receiveFromPartition("2", EventPosition.latest(), ownerLevel(2)).subscribe();
+
+            Throwable disconnected = ownerEnds.block(RECEIVE_TIMEOUT).getThrowable();
+            assertEquals(AmqpErrorCondition.LINK_STOLEN, condition(disconnected), String.valueOf(disconnected));
+        }
+    }
+
+    @Test
+    @DisplayName("a receiver without an owner level is refused while the partition has an owner")
+    void aReceiverWithoutOwnerLevelIsRefusedWhileAnOwnerHolds() throws InterruptedException {
+        try (EventHubConsumerAsyncClient owner = limitsConsumer(); EventHubConsumerAsyncClient plain = limitsConsumer()) {
+            owner.receiveFromPartition("3", EventPosition.latest(), ownerLevel(1)).subscribe();
+            Thread.sleep(ATTACH_WAIT_MS);
+
+            Throwable refused = plain.receiveFromPartition("3", EventPosition.latest())
+                    .then().materialize().block(RECEIVE_TIMEOUT).getThrowable();
+            assertEquals(AmqpErrorCondition.LINK_STOLEN, condition(refused), String.valueOf(refused));
+        }
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
+
+    private static ReceiveOptions ownerLevel(long level) {
+        return new ReceiveOptions().setOwnerLevel(level);
+    }
 
     /** A consumer on {@link #LIMITS_CONSUMER_GROUP} that does not retry, so a refusal surfaces at once. */
     private EventHubConsumerAsyncClient limitsConsumer() {
