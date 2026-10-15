@@ -70,6 +70,14 @@ producer.send(batch);
 producer.close();
 ```
 
+## Reading events
+
+Reading an event does not remove it, as in Azure. Every receiver reads a partition from its own start position (earliest, latest, an offset, a sequence number or an enqueued time) and keeps receiving the events sent after it attached. Two receivers on the same partition and consumer group each get every event, and a new receiver can read the same events again.
+
+An event stays until its hub's retention ends, measured from the time it was enqueued, and then it is gone for every receiver. Set the retention per hub in the entities, for example `eh1:4:PT10M`.
+
+The broker keeps the events of each hub's retention in memory, one copy per consumer group, within its 2 GB heap. Give a hub that takes many events a shorter retention.
+
 ## Configuration
 
 ### Docker Compose
@@ -97,7 +105,7 @@ services:
 |---|---|---|
 | `FLOCI_AZ_SERVICES_EVENT_HUB_ENABLED` | `true` | Enable/disable the service |
 | `FLOCI_AZ_SERVICES_EVENT_HUB_DEFAULT_NAMESPACE` | `emulatorNs1` | AMQP namespace name |
-| `FLOCI_AZ_SERVICES_EVENT_HUB_ENTITIES` | `eh1:4` | Comma-separated `name:partitions` pairs |
+| `FLOCI_AZ_SERVICES_EVENT_HUB_ENTITIES` | `eh1:4` | Comma-separated `name:partitions[:retention]` entries. The retention is an ISO-8601 duration such as `PT10M`; without one a hub keeps events for `PT1H`, Azure's default, and the longest allowed is `P90D` |
 | `FLOCI_AZ_SERVICES_EVENT_HUB_AMQP_PORT` | `5672` | Host port for AMQP (Artemis) |
 | `FLOCI_AZ_SERVICES_EVENT_HUB_KAFKA_ENABLED` | `false` | Enable Kafka-compatible endpoint |
 | `FLOCI_AZ_SERVICES_EVENT_HUB_KAFKA_PORT` | `9093` | Host port for Kafka (Redpanda). Redpanda advertises it on `localhost`, or on the Docker daemon's host with `FLOCI_AZ_DOCKER_ENDPOINT_MODE=published` |
