@@ -49,6 +49,7 @@ public final class ServiceBusPeekPlugin implements ActiveMQServerPlugin {
      * duplicated from {@code AmqpReplyRouting}, which is built into the AMQP protocol jar.
      */
     private static final String CONNECTION_ID_PROPERTY = "floci_connection_id";
+    private static final SimpleString CONNECTION_ID = SimpleString.of(CONNECTION_ID_PROPERTY);
     private static final int MAX_MESSAGE_COUNT = 250;
     private static final int MAX_RESPONSE_PAYLOAD_BYTES = 1_048_576;
     private static final Symbol SEQUENCE_NUMBER = Symbol.valueOf("x-opt-sequence-number");
@@ -256,10 +257,6 @@ public final class ServiceBusPeekPlugin implements ActiveMQServerPlugin {
         Map<String, Object> applicationProperties = new HashMap<>();
         applicationProperties.put(STATUS_CODE, statusCode);
         applicationProperties.put(STATUS_DESCRIPTION, description);
-        Object connectionId = request.getObjectProperty(CONNECTION_ID_PROPERTY);
-        if (connectionId != null) {
-            applicationProperties.put(CONNECTION_ID_PROPERTY, connectionId.toString());
-        }
 
         ActiveMQServer activeServer = requireServer();
         AMQPStandardMessage response = AMQPStandardMessage.createMessage(
@@ -273,10 +270,24 @@ public final class ServiceBusPeekPlugin implements ActiveMQServerPlugin {
                 applicationProperties,
                 null,
                 body.isEmpty() ? null : new AmqpValue(body));
-        // Each client has its own subscription on the management address, and the stamp copied
-        // above lets only the requesting connection's subscription take the response.
+        // Each client has its own subscription on the management address, and the stamp lets
+        // only the requesting connection's subscription take the response.
+        copyConnectionId(request, response);
         response.setAddress(request.getAddress());
         activeServer.getPostOffice().route(response, false);
+    }
+
+    /**
+     * Copies the stamp of the request onto the response as a broker property. The subscription
+     * filter reads a broker property, but the broker does not send it, so the client receives the
+     * response without the stamp, as Azure sends it.
+     */
+    private static void copyConnectionId(AMQPMessage request, AMQPMessage response) {
+        Object connectionId = request.getObjectProperty(CONNECTION_ID_PROPERTY);
+        if (connectionId != null) {
+            response.createExtraProperties()
+                    .putSimpleStringProperty(CONNECTION_ID, SimpleString.of(connectionId.toString()));
+        }
     }
 
     private ActiveMQServer requireServer() {

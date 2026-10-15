@@ -35,7 +35,8 @@ import java.util.Map;
  *
  * The reply reaches only the connection that sent the request, as in Azure: the broker stamps
  * each request with the id of its connection, a receiver on {@code $cbs} gets only the messages
- * stamped with its own connection's id, and the reply carries the stamp back.
+ * stamped with its own connection's id, and the reply carries the stamp back. The broker keeps
+ * the stamp of a reply to itself, so the client receives the reply without it.
  *
  * Uses proton-j directly since it is the same low-level AMQP library the SDK uses internally.
  */

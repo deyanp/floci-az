@@ -47,6 +47,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Several connections each attach a receiver. When all of them are attached, each connection
  * sends one request, so every reply has a receiver on every connection it could go to. Each
  * connection must then hold exactly one reply: the one to its own request.
+ *
+ * <p>The broker routes each reply by a property of its own, which Azure never sends. Each reply
+ * must reach the client without it, so that the client sees the reply as Azure sends it.
  */
 @DisplayName("CBS and management replies")
 class AmqpReplyRoutingCompatibilityTest {
@@ -57,6 +60,8 @@ class AmqpReplyRoutingCompatibilityTest {
     private static final long EXCHANGE_TIMEOUT_MS = 60_000;
     /** How long the reactor thread gets to end once it has been told to stop. */
     private static final long STOP_TIMEOUT_MS = 10_000;
+    /** The application property the broker routes a reply by. Azure sends no such property. */
+    private static final String ROUTING_PROPERTY = "floci_connection_id";
 
     @Test
     @DisplayName("Event Hubs: each connection receives only the reply to its own put-token")
@@ -189,8 +194,12 @@ class AmqpReplyRoutingCompatibilityTest {
         for (int i = 0; i < CONNECTIONS; i++) {
             List<Object> correlationIds = new ArrayList<>();
             for (Message reply : exchange.replies.get(i)) {
-                assertEquals(expectedStatus, ((Number) reply.getApplicationProperties().getValue()
-                        .get(statusProperty)).intValue(), "connection " + i + " received an unexpected reply");
+                Map<?, ?> properties = reply.getApplicationProperties().getValue();
+                assertEquals(expectedStatus, ((Number) properties.get(statusProperty)).intValue(),
+                        "connection " + i + " received an unexpected reply");
+                assertFalse(properties.containsKey(ROUTING_PROPERTY),
+                        "connection " + i + " received a reply with " + ROUTING_PROPERTY
+                                + ", which Azure never sends: " + properties);
                 correlationIds.add(reply.getCorrelationId());
             }
             assertEquals(List.of(exchange.requestIds.get(i)), correlationIds,
