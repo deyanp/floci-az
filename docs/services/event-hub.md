@@ -80,6 +80,8 @@ The broker keeps the events of each hub's retention in memory, one copy per cons
 
 At most five receivers read one partition of one consumer group at a time, as in Azure. The sixth is refused with `amqp:resource-limit-exceeded`, which the SDKs report as quota exceeded.
 
+A receiver with an owner level (the `com.microsoft:epoch` link property) owns its partition in its consumer group, as in Azure. It disconnects every receiver with a lower or equal owner level and every receiver without one. While it holds the partition, a receiver with a lower owner level or none is refused. A disconnect and a refusal both carry `amqp:link:stolen`, which the SDKs report as the consumer disconnected. This is how two event processors share the partitions of a hub without reading one partition twice.
+
 ## Configuration
 
 ### Docker Compose

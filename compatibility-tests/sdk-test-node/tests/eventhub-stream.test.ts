@@ -18,8 +18,12 @@ const ACCOUNT = process.env.FLOCI_AZ_ACCOUNT ?? "devstoreaccount1";
 const PARTITION = "2";
 const SEND_ADDR = `${HUB}/Partitions/${PARTITION}`;
 const QUEUE     = `${HUB}/ConsumerGroups/$Default/Partitions/${PARTITION}`;
-/** A partition of a consumer group no other test reads, so that only these receivers count toward its limits. */
-const LIMITS_QUEUE = `${HUB}/ConsumerGroups/my-consumer-group/Partitions/${PARTITION}`;
+/**
+ * A partition of a consumer group no other test reads, so that only these receivers count toward its
+ * limits. Each test of the limits reads a partition of its own, so that the receivers one test closes
+ * cannot count toward the next one's.
+ */
+const limitsQueue = (partition: string) => `${HUB}/ConsumerGroups/my-consumer-group/Partitions/${partition}`;
 /** The descriptor of the selector filter the Azure SDKs send a start position as. */
 const SELECTOR_FILTER = 0x468c00000004;
 /** How long a receiver gets to attach before the events it must see are sent. */
@@ -108,10 +112,16 @@ function conditionOf(error: unknown): string | undefined {
   return error && typeof error === "object" && "condition" in error ? String(error.condition) : undefined;
 }
 
+/** A receiver on the queue, with an epoch (the SDKs' owner level) if one is given. */
+function epochReceiver(conn: Connection, queue: string, epoch?: number): Promise<Receiver> {
+  const properties = epoch === undefined ? undefined : { "com.microsoft:epoch": types.wrap_long(epoch) };
+  return conn.createReceiver({ source: { address: queue }, properties });
+}
+
 /** The error condition a receiver is refused with, or undefined if it is admitted. */
-async function refusal(conn: Connection, queue: string): Promise<string | undefined> {
+async function refusal(conn: Connection, queue: string, epoch?: number): Promise<string | undefined> {
   try {
-    const receiver = await conn.createReceiver({ source: { address: queue } });
+    const receiver = await epochReceiver(conn, queue, epoch);
     // A refusal can also come as a detach right after the attach.
     await new Promise((r) => setTimeout(r, READ_WAIT_MS));
     return conditionOf(receiver.error);
@@ -195,10 +205,35 @@ test("a partition of a consumer group takes five receivers and refuses the sixth
   const conn = await openConn();
   try {
     for (let i = 0; i < 5; i++) {
-      expect(await refusal(conn, LIMITS_QUEUE)).toBeUndefined();
+      expect(await refusal(conn, limitsQueue(PARTITION))).toBeUndefined();
     }
-    expect(await refusal(conn, LIMITS_QUEUE)).toBe("amqp:resource-limit-exceeded");
+    expect(await refusal(conn, limitsQueue(PARTITION))).toBe("amqp:resource-limit-exceeded");
   } finally {
     await conn.close();
   }
 }, 60_000);
+
+test("a receiver with a higher epoch disconnects the current owner", async () => {
+  if (eventHubMocked) return;
+  const conn = await openConn();
+  try {
+    const owner = await epochReceiver(conn, limitsQueue("3"), 1);
+
+    expect(await refusal(conn, limitsQueue("3"), 2)).toBeUndefined();
+    expect(conditionOf(owner.error)).toBe("amqp:link:stolen");
+  } finally {
+    await conn.close();
+  }
+}, 30_000);
+
+test("a receiver without an epoch is refused while the partition has an owner", async () => {
+  if (eventHubMocked) return;
+  const conn = await openConn();
+  try {
+    await epochReceiver(conn, limitsQueue("0"), 1);
+
+    expect(await refusal(conn, limitsQueue("0"))).toBe("amqp:link:stolen");
+  } finally {
+    await conn.close();
+  }
+}, 30_000);
