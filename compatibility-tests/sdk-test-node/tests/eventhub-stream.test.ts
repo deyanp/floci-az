@@ -18,6 +18,8 @@ const ACCOUNT = process.env.FLOCI_AZ_ACCOUNT ?? "devstoreaccount1";
 const PARTITION = "2";
 const SEND_ADDR = `${HUB}/Partitions/${PARTITION}`;
 const QUEUE     = `${HUB}/ConsumerGroups/$Default/Partitions/${PARTITION}`;
+/** A partition of a consumer group no other test reads, so that only these receivers count toward its limits. */
+const LIMITS_QUEUE = `${HUB}/ConsumerGroups/my-consumer-group/Partitions/${PARTITION}`;
 /** The descriptor of the selector filter the Azure SDKs send a start position as. */
 const SELECTOR_FILTER = 0x468c00000004;
 /** How long a receiver gets to attach before the events it must see are sent. */
@@ -101,6 +103,23 @@ async function readAll(testId: string, position?: string, host = HOST, port = PO
   return received.map((m) => String(m.body));
 }
 
+/** The AMQP error condition an error carries, if any. */
+function conditionOf(error: unknown): string | undefined {
+  return error && typeof error === "object" && "condition" in error ? String(error.condition) : undefined;
+}
+
+/** The error condition a receiver is refused with, or undefined if it is admitted. */
+async function refusal(conn: Connection, queue: string): Promise<string | undefined> {
+  try {
+    const receiver = await conn.createReceiver({ source: { address: queue } });
+    // A refusal can also come as a detach right after the attach.
+    await new Promise((r) => setTimeout(r, READ_WAIT_MS));
+    return conditionOf(receiver.error);
+  } catch (error) {
+    return conditionOf(error);
+  }
+}
+
 const bodies = (from: number, to: number) => Array.from({ length: to - from }, (_, i) => `event-${from + i}`);
 
 // ---- tests ------------------------------------------------------------------
@@ -170,3 +189,16 @@ test("an event leaves its partition when its hub's retention ends, and not befor
     await fetch(`${BASE}/${ACCOUNT}-eventhub/namespaces/${namespace}`, { method: "DELETE" });
   }
 }, 150_000);
+
+test("a partition of a consumer group takes five receivers and refuses the sixth", async () => {
+  if (eventHubMocked) return;
+  const conn = await openConn();
+  try {
+    for (let i = 0; i < 5; i++) {
+      expect(await refusal(conn, LIMITS_QUEUE)).toBeUndefined();
+    }
+    expect(await refusal(conn, LIMITS_QUEUE)).toBe("amqp:resource-limit-exceeded");
+  } finally {
+    await conn.close();
+  }
+}, 60_000);

@@ -78,6 +78,8 @@ An event stays until its hub's retention ends, measured from the time it was enq
 
 The broker keeps the events of each hub's retention in memory, one copy per consumer group, within its 2 GB heap. Give a hub that takes many events a shorter retention.
 
+At most five receivers read one partition of one consumer group at a time, as in Azure. The sixth is refused with `amqp:resource-limit-exceeded`, which the SDKs report as quota exceeded.
+
 ## Configuration
 
 ### Docker Compose

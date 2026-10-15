@@ -1,5 +1,8 @@
 package io.floci.az.compat;
 
+import com.azure.core.amqp.AmqpRetryOptions;
+import com.azure.core.amqp.exception.AmqpErrorCondition;
+import com.azure.core.amqp.exception.AmqpException;
 import com.azure.messaging.eventhubs.EventData;
 import com.azure.messaging.eventhubs.EventDataBatch;
 import com.azure.messaging.eventhubs.EventHubConsumerAsyncClient;
@@ -51,6 +54,8 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 class EventHubStreamCompatibilityTest {
 
     private static final String CONSUMER_GROUP = "$Default";
+    /** A consumer group no other test reads, so that only this class's receivers count toward its limits. */
+    private static final String LIMITS_CONSUMER_GROUP = "my-consumer-group";
     private static final String PARTITION = "1";
     private static final int EVENT_COUNT = 5;
     private static final Duration RECEIVE_TIMEOUT = Duration.ofSeconds(30);
@@ -154,7 +159,51 @@ class EventHubStreamCompatibilityTest {
         }
     }
 
+    /**
+     * Azure lets five receivers read one partition of one consumer group and refuses the sixth
+     * with {@code amqp:resource-limit-exceeded}, which the SDK reports as quota exceeded.
+     */
+    @Test
+    @DisplayName("a partition of a consumer group takes five receivers and refuses the sixth")
+    void refusesTheSixthReceiver() throws InterruptedException {
+        List<EventHubConsumerAsyncClient> five = new ArrayList<>();
+        try {
+            for (int i = 0; i < 5; i++) {
+                EventHubConsumerAsyncClient receiver = limitsConsumer();
+                five.add(receiver);
+                receiver.receiveFromPartition(PARTITION, EventPosition.latest()).subscribe();
+            }
+            Thread.sleep(ATTACH_WAIT_MS);
+
+            try (EventHubConsumerAsyncClient sixth = limitsConsumer()) {
+                Throwable refused = sixth.receiveFromPartition(PARTITION, EventPosition.latest())
+                        .then().materialize().block(RECEIVE_TIMEOUT).getThrowable();
+                assertEquals(AmqpErrorCondition.RESOURCE_LIMIT_EXCEEDED, condition(refused), String.valueOf(refused));
+            }
+        } finally {
+            five.forEach(EventHubConsumerAsyncClient::close);
+        }
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
+
+    /** A consumer on {@link #LIMITS_CONSUMER_GROUP} that does not retry, so a refusal surfaces at once. */
+    private EventHubConsumerAsyncClient limitsConsumer() {
+        return EmulatorConfig.eventHubClientBuilder()
+                .consumerGroup(LIMITS_CONSUMER_GROUP)
+                .retryOptions(new AmqpRetryOptions().setMaxRetries(0))
+                .buildAsyncConsumerClient();
+    }
+
+    /** The AMQP error condition behind an error the SDK raised, or null if it carries none. */
+    private static AmqpErrorCondition condition(Throwable error) {
+        for (Throwable cause = error; cause != null; cause = cause.getCause()) {
+            if (cause instanceof AmqpException amqp && amqp.getErrorCondition() != null) {
+                return amqp.getErrorCondition();
+            }
+        }
+        return null;
+    }
 
     private EventHubConsumerAsyncClient consumer() {
         return EmulatorConfig.eventHubClientBuilder().consumerGroup(CONSUMER_GROUP).buildAsyncConsumerClient();
