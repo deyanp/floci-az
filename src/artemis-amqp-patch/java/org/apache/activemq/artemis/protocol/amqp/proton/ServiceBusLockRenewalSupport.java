@@ -8,6 +8,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import org.apache.activemq.artemis.api.core.SimpleString;
+import org.apache.activemq.artemis.core.server.ActiveMQServer;
 import org.apache.activemq.artemis.protocol.amqp.broker.AMQPMessage;
 import org.apache.activemq.artemis.protocol.amqp.broker.AMQPStandardMessage;
 import org.apache.qpid.proton.amqp.messaging.Accepted;
@@ -94,8 +95,8 @@ public final class ServiceBusLockRenewalSupport {
       // The reply goes to every receiver on the management address; the stamp keeps it to the
       // connection that asked.
       AmqpReplyRouting.copyStamp(request, applicationProperties);
-      var server = connection.getProtocolManager().getServer();
-      var reply = AMQPStandardMessage.createMessage(server.getStorageManager().generateID(), 0,
+      ActiveMQServer server = connection.getProtocolManager().getServer();
+      AMQPStandardMessage reply = AMQPStandardMessage.createMessage(server.getStorageManager().generateID(), 0,
          null, null, replyProperties, null, null, applicationProperties, null, new AmqpValue(response));
       reply.setAddress(address);
       server.getPostOffice().route(reply, false);

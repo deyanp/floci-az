@@ -234,7 +234,8 @@ class AmqpReplyRoutingTest {
     }
 
     private static AMQPStandardMessage message(Map<String, Object> applicationProperties) {
-        var message = Proton.message();
+        // Proton's Message: the Artemis Message this file imports is a different type.
+        org.apache.qpid.proton.message.Message message = Proton.message();
         message.setMessageId("request-1");
         message.setApplicationProperties(new ApplicationProperties(applicationProperties));
         byte[] buffer = new byte[1024];
@@ -247,7 +248,8 @@ class AmqpReplyRoutingTest {
         ReadableBuffer data = message.getSendBuffer(1, null);
         byte[] bytes = new byte[data.remaining()];
         data.get(bytes);
-        var decoded = Proton.message();
+        // Proton's Message: the Artemis Message this file imports is a different type.
+        org.apache.qpid.proton.message.Message decoded = Proton.message();
         decoded.decode(bytes, 0, bytes.length);
         return decoded.getApplicationProperties().getValue().get(PROPERTY);
     }
