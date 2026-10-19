@@ -46,21 +46,10 @@ import static org.junit.jupiter.api.Assertions.*;
 class EventHubSdkCompatibilityTest {
 
     private static final String CONSUMER_GROUP = "$Default";
-    /**
-     * A second consumer group, which holds its own copy of every partition. Reading an event
-     * removes it from the queue it was read from, so the tests that start a receiver at a
-     * position learn the positions here and leave the events in {@link #CONSUMER_GROUP} unread.
-     */
-    private static final String POSITIONS_CONSUMER_GROUP = "my-consumer-group";
     private static final Duration RECEIVE_TIMEOUT = Duration.ofSeconds(3);
     private static final int EVENT_COUNT = 8;
     /** How many events one read takes off a partition. Comfortably more than this test sends. */
     private static final int RECEIVE_LIMIT = EVENT_COUNT * 4;
-    /**
-     * How many events a read of a whole partition takes at most. The tests from 07 on read their
-     * own events back from one partition, which by then holds the events of the earlier tests too.
-     */
-    private static final int PARTITION_READ_LIMIT = 1_000;
     /** The pause between two sends whose events must not share an enqueued time. */
     private static final long SEND_PAUSE_MS = 5;
     /** The annotations Azure sets on every event it delivers, which the SDK reads the position from. */
@@ -257,7 +246,7 @@ class EventHubSdkCompatibilityTest {
         Instant sentFrom = Instant.now();
         sendTo(partitionId, 0, EVENT_COUNT);
 
-        List<EventData> events = receiveEvents(CONSUMER_GROUP, partitionId, EventPosition.earliest());
+        List<EventData> events = receiveEvents(partitionId, testStart);
 
         assertEquals(EVENT_COUNT, events.size(), "not every event was received back");
         long previous = -1;
@@ -284,7 +273,7 @@ class EventHubSdkCompatibilityTest {
     void sequenceNumberPositionReadsFromThere() {
         String partitionId = partitionIds().get(0);
         sendTo(partitionId, 0, EVENT_COUNT);
-        List<EventData> events = receiveEvents(POSITIONS_CONSUMER_GROUP, partitionId, EventPosition.earliest());
+        List<EventData> events = receiveEvents(partitionId, testStart);
         long middle = events.get(EVENT_COUNT / 2).getSequenceNumber();
 
         assertReadsFrom(partitionId, EventPosition.fromSequenceNumber(middle, true), events,
@@ -296,7 +285,7 @@ class EventHubSdkCompatibilityTest {
     void offsetPositionReadsFromThere() {
         String partitionId = partitionIds().get(0);
         sendTo(partitionId, 0, EVENT_COUNT);
-        List<EventData> events = receiveEvents(POSITIONS_CONSUMER_GROUP, partitionId, EventPosition.earliest());
+        List<EventData> events = receiveEvents(partitionId, testStart);
         long middle = Long.parseLong(events.get(EVENT_COUNT / 2).getOffsetString());
 
         EventPosition position = EventPosition.fromOffsetString(Long.toString(middle));
@@ -316,7 +305,7 @@ class EventHubSdkCompatibilityTest {
             sendTo(partitionId, i, 1);
             Thread.sleep(SEND_PAUSE_MS);
         }
-        List<EventData> events = receiveEvents(POSITIONS_CONSUMER_GROUP, partitionId, EventPosition.earliest());
+        List<EventData> events = receiveEvents(partitionId, testStart);
         Instant middle = events.get(EVENT_COUNT / 2).getEnqueuedTime();
 
         EventPosition position = EventPosition.fromEnqueuedTime(middle);
@@ -366,21 +355,18 @@ class EventHubSdkCompatibilityTest {
         List<String> expected = bodies(events, fromPosition);
         assertFalse(expected.isEmpty(), position + " selects none of the events");
         assertTrue(expected.size() < events.size(), position + " selects every event");
-        assertEquals(expected, bodies(receiveEvents(CONSUMER_GROUP, partitionId, position), event -> true));
+        assertEquals(expected, receiveFrom(partitionId, position));
     }
 
-    /**
-     * This test's own events on one partition of {@code consumerGroup}, from {@code position}
-     * onwards, in order.
-     */
-    private List<EventData> receiveEvents(String consumerGroup, String partitionId, EventPosition position) {
+    /** This test's own events on one partition, from {@code position} onwards, in order. */
+    private List<EventData> receiveEvents(String partitionId, EventPosition position) {
         List<EventData> events = new ArrayList<>();
         try (EventHubConsumerClient consumer =
                      EmulatorConfig.eventHubClientBuilder()
-                             .consumerGroup(consumerGroup)
+                             .consumerGroup(CONSUMER_GROUP)
                              .buildConsumerClient()) {
             for (PartitionEvent event :
-                    consumer.receiveFromPartition(partitionId, PARTITION_READ_LIMIT, position, RECEIVE_TIMEOUT)) {
+                    consumer.receiveFromPartition(partitionId, RECEIVE_LIMIT, position, RECEIVE_TIMEOUT)) {
                 if (testId.equals(event.getData().getProperties().get("testId"))) {
                     events.add(event.getData());
                 }
@@ -395,19 +381,6 @@ class EventHubSdkCompatibilityTest {
 
     /** Bodies of this test's own events on one partition, from {@code position} onwards. */
     private List<String> receiveFrom(String partitionId, EventPosition position) {
-        List<String> bodies = new ArrayList<>();
-        try (EventHubConsumerClient consumer =
-                     EmulatorConfig.eventHubClientBuilder()
-                             .consumerGroup(CONSUMER_GROUP)
-                             .buildConsumerClient()) {
-            for (PartitionEvent event :
-                    consumer.receiveFromPartition(partitionId, RECEIVE_LIMIT, position, RECEIVE_TIMEOUT)) {
-                EventData data = event.getData();
-                if (testId.equals(data.getProperties().get("testId"))) {
-                    bodies.add(data.getBodyAsString());
-                }
-            }
-        }
-        return bodies;
+        return bodies(receiveEvents(partitionId, position), event -> true);
     }
 }
