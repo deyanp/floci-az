@@ -107,6 +107,24 @@ async function readAll(testId: string, position?: string, host = HOST, port = PO
   return received.map((m) => String(m.body));
 }
 
+/**
+ * The body of the first event a new receiver on the queue reads, or undefined if none comes within
+ * the read wait. It returns on the first event, so a read takes only as long as the event takes.
+ */
+async function readFirst(testId: string, host: string, port: number, queue: string): Promise<string | undefined> {
+  const conn = await openConn(host, port);
+  const receiver = await attach(conn, testId, undefined, queue);
+  const body = await new Promise<string | undefined>((resolve) => {
+    const timer = setTimeout(() => resolve(undefined), READ_WAIT_MS);
+    receiver.on(ReceiverEvents.message, (ctx) => {
+      clearTimeout(timer);
+      resolve(String(ctx.message?.body));
+    });
+  });
+  await conn.close();
+  return body;
+}
+
 /** The AMQP error condition an error carries, if any. */
 function conditionOf(error: unknown): string | undefined {
   return error && typeof error === "object" && "condition" in error ? String(error.condition) : undefined;
@@ -191,10 +209,10 @@ test("an event leaves its partition when its hub's retention ends, and not befor
     await send(testId, 1, conn, "eh1");
     await conn.close();
 
-    expect(await readAll(testId, undefined, host, port, queue)).toEqual(["event-0"]);
-    expect(await readAll(testId, undefined, host, port, queue)).toEqual(["event-0"]);
+    expect(await readFirst(testId, host, port, queue)).toBe("event-0");
+    expect(await readFirst(testId, host, port, queue)).toBe("event-0");
     await new Promise((r) => setTimeout(r, 6_000));
-    expect(await readAll(testId, undefined, host, port, queue)).toEqual([]);
+    expect(await readFirst(testId, host, port, queue)).toBeUndefined();
   } finally {
     await fetch(`${BASE}/${ACCOUNT}-eventhub/namespaces/${namespace}`, { method: "DELETE" });
   }
