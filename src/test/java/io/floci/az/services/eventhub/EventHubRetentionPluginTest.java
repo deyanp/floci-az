@@ -2,9 +2,14 @@ package io.floci.az.services.eventhub;
 
 import org.apache.activemq.artemis.api.core.SimpleString;
 import org.apache.activemq.artemis.core.filter.Filter;
+import org.apache.activemq.artemis.core.persistence.impl.nullpm.NullStorageManager;
 import org.apache.activemq.artemis.core.server.ActiveMQServer;
+import org.apache.activemq.artemis.core.server.MessageReference;
 import org.apache.activemq.artemis.core.server.Queue;
+import org.apache.activemq.artemis.core.server.ServerConsumer;
+import org.apache.activemq.artemis.core.server.impl.AckReason;
 import org.apache.activemq.artemis.core.server.plugin.ActiveMQServerPlugin;
+import org.apache.activemq.artemis.core.transaction.Transaction;
 import org.apache.activemq.artemis.protocol.amqp.broker.AMQPStandardMessage;
 import org.apache.qpid.proton.Proton;
 import org.apache.qpid.proton.amqp.messaging.ApplicationProperties;
@@ -18,38 +23,78 @@ import java.net.URLClassLoader;
 import java.util.Arrays;
 import java.util.Map;
 
-import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
  * A read never removes an event; its hub's retention does. The retention plugin deletes, from each
  * consumer group queue, the events enqueued longer ago than that queue's retention, and no other.
+ * A queue holds its events in enqueued order, so a sweep deletes from the head and stops at the
+ * first event still in retention.
  */
 class EventHubRetentionPluginTest {
 
+    private static final String QUEUE = "eh1/ConsumerGroups/$Default/Partitions/0";
+
     @Test
-    @DisplayName("a sweep deletes the events older than the queue's retention, and keeps the newer ones")
-    void deletesEventsOlderThanTheRetention() throws Exception {
-        Queue queue = mock(Queue.class);
-        Queue other = mock(Queue.class);
-        ActiveMQServer server = mock(ActiveMQServer.class);
-        when(server.locateQueue(SimpleString.of("eh1/ConsumerGroups/$Default/Partitions/0"))).thenReturn(queue);
-        when(server.locateQueue(SimpleString.of("unlisted"))).thenReturn(other);
-
-        sweep(Map.of("retention", "eh1/ConsumerGroups/$Default/Partitions/0=60000"), server);
-
-        ArgumentCaptor<Filter> deleted = ArgumentCaptor.forClass(Filter.class);
-        verify(queue).deleteMatchingReferences(deleted.capture());
-        verify(other, never()).deleteMatchingReferences(any(Filter.class));
+    @DisplayName("a sweep deletes the expired events at the head of the queue, and stops at the first one still in retention")
+    void deletesTheExpiredHeadAndStopsAtTheFirstEventInRetention() throws Exception {
         long now = System.currentTimeMillis();
-        assertTrue(deleted.getValue().match(event(now - 120_000)), "an event two minutes old was kept");
-        assertFalse(deleted.getValue().match(event(now - 1_000)), "an event one second old was deleted");
+        MessageReference oldest = event(1, now - 180_000);
+        MessageReference old = event(2, now - 120_000);
+        MessageReference fresh = event(3, now - 1_000);
+        Queue queue = mock(Queue.class);
+        when(queue.peekFirstMessage()).thenReturn(oldest, old, fresh);
+        when(queue.removeReferenceWithID(1)).thenReturn(oldest);
+        when(queue.removeReferenceWithID(2)).thenReturn(old);
+        ActiveMQServer server = server();
+        when(server.locateQueue(SimpleString.of(QUEUE))).thenReturn(queue);
+
+        sweep(Map.of("retention", QUEUE + "=60000"), server);
+
+        ArgumentCaptor<Transaction> tx = ArgumentCaptor.forClass(Transaction.class);
+        verify(queue).acknowledge(tx.capture(), eq(oldest), eq(AckReason.KILLED), isNull(), eq(false));
+        verify(queue).acknowledge(tx.getValue(), old, AckReason.KILLED, null, false);
+        assertEquals(Transaction.State.COMMITTED, tx.getValue().getState(), "the deletes were not committed");
+        verify(queue, never()).removeReferenceWithID(3);
+        verify(queue, times(3)).peekFirstMessage();
+        verify(queue, never()).iterator();
+        verify(queue, never()).deleteMatchingReferences(any(Filter.class));
+    }
+
+    @Test
+    @DisplayName("a sweep deletes nothing from a queue whose oldest event is in retention, and leaves an unlisted queue alone")
+    void keepsAQueueWhoseOldestEventIsInRetention() throws Exception {
+        MessageReference fresh = event(1, System.currentTimeMillis() - 1_000);
+        Queue queue = mock(Queue.class);
+        when(queue.peekFirstMessage()).thenReturn(fresh);
+        Queue unlisted = mock(Queue.class);
+        ActiveMQServer server = server();
+        when(server.locateQueue(SimpleString.of(QUEUE))).thenReturn(queue);
+        when(server.locateQueue(SimpleString.of("unlisted"))).thenReturn(unlisted);
+
+        sweep(Map.of("retention", QUEUE + "=60000"), server);
+
+        verify(queue, never()).removeReferenceWithID(anyLong());
+        verify(queue, never()).acknowledge(any(Transaction.class), any(MessageReference.class),
+                any(AckReason.class), any(ServerConsumer.class), anyBoolean());
+        verify(unlisted, never()).peekFirstMessage();
+    }
+
+    private static ActiveMQServer server() {
+        ActiveMQServer server = mock(ActiveMQServer.class);
+        when(server.getStorageManager()).thenReturn(new NullStorageManager());
+        return server;
     }
 
     /** Runs one sweep of a plugin loaded from the broker extension jar, as the broker loads it. */
@@ -67,13 +112,17 @@ class EventHubRetentionPluginTest {
         }
     }
 
-    /** An event stamped with its enqueued time, which the filter reads like any other property. */
-    private static AMQPStandardMessage event(long enqueuedTime) {
+    /** A queued event stamped with its enqueued time, which the filter reads like any other property. */
+    private static MessageReference event(long messageId, long enqueuedTime) {
         // Proton's Message: Artemis has a Message type of its own.
         org.apache.qpid.proton.message.Message message = Proton.message();
         message.setApplicationProperties(new ApplicationProperties(Map.of("floci_enqueued_time", enqueuedTime)));
         byte[] buffer = new byte[1024];
         int size = message.encode(buffer, 0, buffer.length);
-        return new AMQPStandardMessage(0, Arrays.copyOf(buffer, size), null);
+        AMQPStandardMessage event = new AMQPStandardMessage(0, Arrays.copyOf(buffer, size), null);
+        event.setMessageID(messageId);
+        MessageReference reference = mock(MessageReference.class);
+        when(reference.getMessage()).thenReturn(event);
+        return reference;
     }
 }

@@ -1,10 +1,15 @@
 package io.floci.az.artemis;
 
 import org.apache.activemq.artemis.api.core.SimpleString;
+import org.apache.activemq.artemis.core.filter.Filter;
 import org.apache.activemq.artemis.core.filter.impl.FilterImpl;
 import org.apache.activemq.artemis.core.server.ActiveMQServer;
+import org.apache.activemq.artemis.core.server.MessageReference;
 import org.apache.activemq.artemis.core.server.Queue;
+import org.apache.activemq.artemis.core.server.impl.AckReason;
 import org.apache.activemq.artemis.core.server.plugin.ActiveMQServerPlugin;
+import org.apache.activemq.artemis.core.transaction.Transaction;
+import org.apache.activemq.artemis.core.transaction.impl.TransactionImpl;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -89,11 +94,41 @@ public final class EventHubRetentionPlugin implements ActiveMQServerPlugin {
                 return;
             }
             try {
-                queue.deleteMatchingReferences(FilterImpl.createFilter(
+                deleteExpired(server, queue, FilterImpl.createFilter(
                         EventHubPartitionPlugin.ENQUEUED_TIME_PROPERTY + " < " + (now - retentionMs)));
             } catch (Exception e) {
                 LOG.log(System.Logger.Level.WARNING, "Could not remove expired events from " + name, e);
             }
         });
+    }
+
+    /**
+     * Deletes the events at the head of the queue that {@code expired} matches, and stops at the
+     * first one it does not match.
+     *
+     * <p>A queue holds its events in enqueued order, so the expired ones are at its head, and a
+     * sweep reads only the events it deletes plus one. {@code Queue.deleteMatchingReferences} would
+     * read every event in the queue, under the queue's lock, every second.
+     *
+     * <p>Each event is removed and then acknowledged as killed, in one transaction, as
+     * {@code deleteMatchingReferences} does it: a non-destructive queue ignores a normal
+     * acknowledgement, so only a killed one lets the event go.
+     */
+    private static void deleteExpired(ActiveMQServer server, Queue queue, Filter expired) throws Exception {
+        Transaction tx = new TransactionImpl(server.getStorageManager());
+        int deleted = 0;
+        MessageReference head = queue.peekFirstMessage();
+        while (head != null && expired.match(head.getMessage())) {
+            MessageReference removed = queue.removeReferenceWithID(head.getMessage().getMessageID());
+            if (removed == null) {
+                break;
+            }
+            queue.acknowledge(tx, removed, AckReason.KILLED, null, false);
+            deleted++;
+            head = queue.peekFirstMessage();
+        }
+        if (deleted > 0) {
+            tx.commit();
+        }
     }
 }
