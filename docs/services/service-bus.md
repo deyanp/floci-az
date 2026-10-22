@@ -142,6 +142,31 @@ properties; supports `maxMessages` and `fromSequenceNumber`; and does not lock, 
 delivery count. Each call returns at most Azure's 250-message limit and may return fewer messages
 when needed to keep the AMQP response bounded. Empty entities return an empty result.
 
+## Management requests
+
+Each entity's `$management` node answers peek (`com.microsoft:peek-message`) and lock renewal
+(`com.microsoft:renew-lock`, `com.microsoft:renew-session-lock`), and the `$cbs` node answers
+`put-token`. Every other request gets status `501` (Not Implemented), with a status description
+that names the operation, and the SDK call fails with that status. Azure implements these
+[operations](https://learn.microsoft.com/en-us/azure/service-bus-messaging/service-bus-amqp-request-response),
+so a call that works against Azure fails against floci-az:
+
+| Operation | What the SDKs use it for |
+|---|---|
+| `com.microsoft:schedule-message` | Schedule messages |
+| `com.microsoft:cancel-scheduled-message` | Cancel scheduled messages |
+| `com.microsoft:receive-by-sequence-number` | Receive deferred messages |
+| `com.microsoft:update-disposition` | Settle deferred messages |
+| `com.microsoft:set-session-state` | Set a session's state |
+| `com.microsoft:get-session-state` | Get a session's state |
+| `com.microsoft:get-message-sessions` | List sessions |
+| `com.microsoft:add-rule` | Add a subscription rule over AMQP |
+| `com.microsoft:remove-rule` | Remove a subscription rule over AMQP |
+| `com.microsoft:enumerate-rules` | List subscription rules over AMQP |
+
+Manage subscription rules through the management plane instead, as
+[Subscription rules and filters](#subscription-rules-and-filters) describes.
+
 ## Connection String
 
 ```

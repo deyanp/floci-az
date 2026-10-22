@@ -84,6 +84,17 @@ At most five receivers read one partition of one consumer group at a time, as in
 
 A receiver with an owner level (the `com.microsoft:epoch` link property) owns its partition in its consumer group, as in Azure. It disconnects every receiver with a lower or equal owner level and every receiver without one. While it holds the partition, a receiver with a lower owner level or none is refused. A disconnect and a refusal both carry `amqp:link:stolen`, which the SDKs report as the consumer disconnected. This is how two event processors share the partitions of a hub without reading one partition twice.
 
+## Management requests
+
+floci-az answers these AMQP requests as Azure does:
+
+| Node | Operation | What the SDKs use it for |
+|---|---|---|
+| `$cbs` | `put-token` | Authorize the connection's links |
+| `$management` | `READ` of `com.microsoft:eventhub` | Get the hub's properties and partition ids |
+
+Every other request gets status `501` (Not Implemented), with a status description that names the operation, and the SDK call fails with that status. This includes a `READ` of `com.microsoft:partition`, which the SDKs send to get a partition's properties: Artemis keeps no sequence numbers or offsets for floci-az to report.
+
 ## Configuration
 
 ### Docker Compose
